@@ -1,0 +1,9 @@
+name: security-and-compliance-auditor
+display_name: "Security and Compliance Auditor"
+runtime: windsurf
+reasoning_effort: high
+install_scope: global
+policy:
+  allow_model_invocation: true
+  preserve_existing_flow_required: false
+  token_saving_wrapper: wf-core run --

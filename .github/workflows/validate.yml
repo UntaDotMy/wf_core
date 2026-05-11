@@ -1,0 +1,42 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust format
+        run: cargo fmt --check
+      - name: Rust tests
+        run: cargo test --locked
+      - name: Rust build
+        run: cargo build --release --locked
+      - name: Global install smoke
+        run: |
+          export CODEIUM_HOME="$RUNNER_TEMP/codeium"
+          export DEVIN_HOME="$RUNNER_TEMP/devin"
+          export WF_CORE_HOME="$RUNNER_TEMP/wf-core"
+          ./target/release/wf-core install --target all --channel next --source-root "$PWD"
+          ./target/release/wf-core verify --target all --channel next
+          test -f "$RUNNER_TEMP/codeium/windsurf-next/wf-core/manifest.tsv"
+          test -f "$RUNNER_TEMP/devin/wf-core/manifest.tsv"
+          grep -q wf-core "$RUNNER_TEMP/devin/config.json"
+      - name: Rewrite smoke
+        run: ./target/release/wf-core rewrite "git status --short"
+      - name: Native flow and review smoke
+        run: |
+          export CODEIUM_HOME="$RUNNER_TEMP/codeium"
+          export WF_CORE_HOME="$RUNNER_TEMP/wf-core"
+          flow_file="$RUNNER_TEMP/flow-check.json"
+          ./target/release/wf-core flow start --channel next --repo-root "$PWD" --target-file src/main.rs --target-function run --output "$flow_file"
+          sed -i 's/"greenfield": false/"greenfield": true/' "$flow_file"
+          ./target/release/wf-core flow check --channel next --repo-root "$PWD" --artifact "$flow_file"
+          ./target/release/wf-core review gates check --repo-root "$PWD" --format compact
+          ./target/release/wf-core git-workflow commit-message --repo-root "$PWD" --test-result "CI smoke"
+          ./target/release/wf-core memory system-map refresh --repo-root "$PWD"
+          ./target/release/wf-core memory system-map verify --repo-root "$PWD"

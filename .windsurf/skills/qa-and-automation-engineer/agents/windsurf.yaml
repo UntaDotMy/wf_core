@@ -1,0 +1,9 @@
+name: qa-and-automation-engineer
+display_name: "QA and Automation Engineer"
+runtime: windsurf
+reasoning_effort: high
+install_scope: global
+policy:
+  allow_model_invocation: true
+  preserve_existing_flow_required: false
+  token_saving_wrapper: wf-core run --

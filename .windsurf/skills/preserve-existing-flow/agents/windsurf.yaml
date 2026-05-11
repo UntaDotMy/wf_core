@@ -1,0 +1,9 @@
+name: preserve-existing-flow
+display_name: "Preserve Existing Flow"
+runtime: windsurf
+reasoning_effort: high
+install_scope: global
+policy:
+  allow_model_invocation: true
+  preserve_existing_flow_required: true
+  token_saving_wrapper: wf-core run --

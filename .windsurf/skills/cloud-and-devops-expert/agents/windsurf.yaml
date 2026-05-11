@@ -1,0 +1,9 @@
+name: cloud-and-devops-expert
+display_name: "Cloud and DevOps Expert"
+runtime: windsurf
+reasoning_effort: high
+install_scope: global
+policy:
+  allow_model_invocation: true
+  preserve_existing_flow_required: false
+  token_saving_wrapper: wf-core run --
