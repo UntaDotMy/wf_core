@@ -2142,6 +2142,7 @@ fn collect_installed_manifest(channel: &str, home: &Path) -> Result<Vec<Manifest
         }
     }
     collect_files_recursive(home, &home.join("wf-core").join("bundle"), &mut files)?;
+    collect_files_recursive(home, &home.join("wf-core").join("shims"), &mut files)?;
     files.sort();
     files.dedup();
 
@@ -2179,6 +2180,7 @@ fn collect_devin_manifest(home: &Path) -> Result<Vec<ManifestEntry>, AppError> {
         }
     }
     collect_files_recursive(home, &home.join("wf-core").join("bundle"), &mut files)?;
+    collect_files_recursive(home, &home.join("wf-core").join("shims"), &mut files)?;
     files.sort();
     files.dedup();
     let mut manifest = Vec::new();
@@ -4468,6 +4470,21 @@ mod tests {
         fs::write(&path, "two").unwrap();
         let second = file_checksum(&path).unwrap();
         assert_ne!(first, second);
+        remove_dir_if_exists(&root).unwrap();
+    }
+
+    #[test]
+    fn manifest_tracks_managed_shims() {
+        let root = env::temp_dir().join(format!("wf-core-manifest-test-{}", now_millis()));
+        let shim = root.join("wf-core").join("shims").join("cargo");
+        fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        fs::write(&shim, "shim").unwrap();
+
+        let manifest = collect_installed_manifest("next", &root).unwrap();
+        assert!(manifest
+            .iter()
+            .any(|entry| { path_to_manifest(&entry.relative_path) == "wf-core/shims/cargo" }));
+
         remove_dir_if_exists(&root).unwrap();
     }
 
