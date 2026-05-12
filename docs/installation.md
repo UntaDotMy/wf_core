@@ -18,22 +18,33 @@ arbitrary user workspace.
 
 ## Install Windsurf Stable, Windsurf Next, and Devin Local
 
+Default install downloads the latest GitHub release archive for your platform
+and does not require cloning this repo or installing Rust.
+
+macOS, Linux, WSL, or Git Bash:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.sh | bash
+```
+
 PowerShell:
 
 ```powershell
-.\install.ps1 -Target all -Channel both
+irm https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.ps1 | iex
 ```
 
-Bash:
+To install from a source checkout instead:
 
 ```bash
-./install.sh --target all --channel both
+git clone https://github.com/UntaDotMy/wf_core.git
+cd wf_core
+./install.sh --from-source --target all --channel both
 ```
 
-CMD:
+CMD from a source checkout:
 
 ```bat
-install.cmd -Target all -Channel both
+install.cmd -FromSource -Target all -Channel both
 ```
 
 Then restart Windsurf, Windsurf Next, and Devin for Terminal.
@@ -41,12 +52,14 @@ Then restart Windsurf, Windsurf Next, and Devin for Terminal.
 ## Install One Channel
 
 ```bash
-cargo build --release
-./target/release/wf-core install --target windsurf --channel next --source-root "$PWD"
-./target/release/wf-core install --target windsurf --channel stable --source-root "$PWD"
-./target/release/wf-core install --target windsurf --channel insiders --source-root "$PWD"
-./target/release/wf-core install --target devin --source-root "$PWD"
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.sh | bash -s -- --target windsurf --channel next
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.sh | bash -s -- --target windsurf --channel stable
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.sh | bash -s -- --target windsurf --channel insiders
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.sh | bash -s -- --target devin --channel next
 ```
+
+Set `WF_CORE_VERSION` or pass `--version` to install a specific release tag.
+Set `WF_CORE_REPOSITORY` or pass `--repository owner/repo` to test a fork.
 
 ## Verify
 
