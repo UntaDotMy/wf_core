@@ -126,7 +126,18 @@ pub fn strip_ansi(text: &str) -> String {
                 Some(']') => loop {
                     match chars.next() {
                         None | Some('\x07') => break,
-                        Some('\x1b') if chars.next() == Some('\\') => break,
+                        Some('\x1b') => {
+                            // Peek ahead for ST terminator (\x1b\\) without
+                            // consuming the next char if it isn't \\.
+                            let mut peek = chars.clone();
+                            match peek.next() {
+                                Some('\\') => {
+                                    chars.next(); // consume the \\
+                                    break;
+                                }
+                                _ => {} // not ST, continue
+                            }
+                        }
                         _ => {}
                     }
                 },

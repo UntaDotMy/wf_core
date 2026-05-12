@@ -214,6 +214,10 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
         };
     }
 
+    // Update compact byte counts to reflect stripped output.
+    final_result.compact_stdout_bytes = final_result.stdout.len();
+    final_result.compact_stderr_bytes = final_result.stderr.len();
+
     if !options.no_redact {
         let (redacted_summary, _) = redact_secrets(&final_result.summary);
         let (redacted_stdout, _) = redact_secrets(&final_result.stdout);
