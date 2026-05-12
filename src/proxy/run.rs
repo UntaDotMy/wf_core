@@ -186,24 +186,34 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
 
     // Strip ANSI escape sequences from all output fields so the compact text
     // is clean before redaction and writing.
+    let pre_strip_summary = final_result.summary.clone();
+    let pre_strip_stdout = final_result.stdout.clone();
+    let pre_strip_stderr = final_result.stderr.clone();
     final_result.summary = strip_ansi(&final_result.summary);
     final_result.stdout = strip_ansi(&final_result.stdout);
     final_result.stderr = strip_ansi(&final_result.stderr);
 
-    // Re-count tokens after stripping ANSI so savings reflect the
-    // compact text the model actually sees.
-    let tokens_after = TokenMeter::estimate_text(&final_result.summary)
-        + TokenMeter::estimate_text(&final_result.stdout)
-        + TokenMeter::estimate_text(&final_result.stderr);
-    final_result.estimated_tokens_after = tokens_after;
-    final_result.estimated_tokens_saved =
-        final_result.estimated_tokens_before as isize - tokens_after as isize;
-    final_result.savings_pct = if final_result.estimated_tokens_before > 0 {
-        (final_result.estimated_tokens_saved as f64 / final_result.estimated_tokens_before as f64)
-            * 100.0
-    } else {
-        0.0
-    };
+    // Adjust token estimate by the ratio of bytes stripped via ANSI removal.
+    // The adapter already computed the correct savings; we just adjust for the
+    // small additional compression from stripping escape sequences.
+    let pre_len = pre_strip_summary.len() + pre_strip_stdout.len() + pre_strip_stderr.len();
+    let post_len =
+        final_result.summary.len() + final_result.stdout.len() + final_result.stderr.len();
+    if pre_len > 0 && post_len < pre_len {
+        let ratio = post_len as f64 / pre_len as f64;
+        let adjusted_after =
+            (final_result.estimated_tokens_after as f64 * ratio).round() as usize;
+        final_result.estimated_tokens_after = adjusted_after;
+        final_result.estimated_tokens_saved =
+            final_result.estimated_tokens_before as isize - adjusted_after as isize;
+        final_result.savings_pct = if final_result.estimated_tokens_before > 0 {
+            (final_result.estimated_tokens_saved as f64
+                / final_result.estimated_tokens_before as f64)
+                * 100.0
+        } else {
+            0.0
+        };
+    }
 
     if !options.no_redact {
         let (redacted_summary, _) = redact_secrets(&final_result.summary);
