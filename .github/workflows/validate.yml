@@ -25,7 +25,7 @@ jobs:
           export CODEIUM_HOME="$RUNNER_TEMP/codeium"
           export DEVIN_HOME="$RUNNER_TEMP/devin"
           export WF_CORE_HOME="$RUNNER_TEMP/wf-core"
-          ./install.sh --from-source --target all --channel next
+          bash install.sh --from-source --target all --channel next
           test -f "$RUNNER_TEMP/codeium/windsurf-next/wf-core/manifest.tsv"
           test -f "$RUNNER_TEMP/devin/wf-core/manifest.tsv"
           grep -q wf-core "$RUNNER_TEMP/devin/config.json"
