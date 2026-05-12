@@ -12,7 +12,7 @@ use super::raw_store::{
 };
 use super::registry::default_registry;
 use super::safety::{is_interactive_command, redact_secrets};
-use super::shell::execute_command;
+use super::shell::execute_command_with_env;
 use super::token_meter::TokenMeter;
 
 const PROXY_RECURSION_ENV: &str = "WF_CORE_PROXY_ACTIVE";
@@ -32,6 +32,7 @@ pub struct RunOptions {
     pub forced_adapter: Option<String>,
     pub budget: OutputBudget,
     pub invoked_as_shim: Option<String>,
+    pub executable_override: Option<PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -49,6 +50,7 @@ impl Default for RunOptions {
             forced_adapter: None,
             budget: OutputBudget::default(),
             invoked_as_shim: None,
+            executable_override: None,
         }
     }
 }
@@ -75,7 +77,22 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
     let started_at_unix_ms = now_unix_ms();
 
     let registry = default_registry();
-    let output = execute_command(command_args, options.shell_mode)?;
+    let effective_command = if let Some(executable) = &options.executable_override {
+        let mut args = Vec::with_capacity(command_args.len());
+        args.push(executable.to_string_lossy().to_string());
+        args.extend(command_args.iter().skip(1).cloned());
+        args
+    } else {
+        command_args.to_vec()
+    };
+    let output = execute_command_with_env(
+        &effective_command,
+        options.shell_mode,
+        [
+            (PROXY_RECURSION_ENV, "1"),
+            ("WF_CORE_CHANNEL", options.channel.as_str()),
+        ],
+    )?;
     let duration_ms = now_unix_ms().saturating_sub(started_at_unix_ms);
     let exit_code = output.status.code().unwrap_or(1);
     let run = RawRun {
