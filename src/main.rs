@@ -1071,16 +1071,16 @@ fn parse_run_options(option_arguments: &[String]) -> Result<proxy::RunOptions, A
     })
 }
 
+const RAW_VALUE_FLAGS: &[&str] = &["--channel", "--target", "--limit", "--older-than", "--path"];
+const RAW_BOOL_FLAGS: &[&str] = &[];
+
 fn command_raw(arguments: &[String]) -> Result<i32, AppError> {
     let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
     let target = proxy::ProxyTarget::from_str(
         &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
     );
 
-    let positional: Vec<&String> = arguments
-        .iter()
-        .filter(|value| !value.starts_with("--"))
-        .collect();
+    let positional = collect_positional(arguments, RAW_VALUE_FLAGS, RAW_BOOL_FLAGS);
 
     let subcommand = positional.first().map(|value| value.as_str()).unwrap_or("");
     match subcommand {
@@ -1131,16 +1131,16 @@ fn command_raw(arguments: &[String]) -> Result<i32, AppError> {
     }
 }
 
+const REPLAY_VALUE_FLAGS: &[&str] = &["--channel", "--target"];
+const REPLAY_BOOL_FLAGS: &[&str] = &["--allow-risky"];
+
 fn command_replay(arguments: &[String]) -> Result<i32, AppError> {
     let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
     let target = proxy::ProxyTarget::from_str(
         &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
     );
     let allow_risky = has_flag(arguments, "--allow-risky");
-    let positional: Vec<&String> = arguments
-        .iter()
-        .filter(|value| !value.starts_with("--"))
-        .collect();
+    let positional = collect_positional(arguments, REPLAY_VALUE_FLAGS, REPLAY_BOOL_FLAGS);
     let raw_id = positional
         .first()
         .ok_or_else(|| AppError::new("Usage: wf-core replay <raw_id> [--allow-risky]"))?;
@@ -3610,6 +3610,28 @@ fn has_flag(arguments: &[String], name: &str) -> bool {
         .any(|argument| argument == name || argument == &format!("{name}=true"))
 }
 
+/// Flags accepted by `wf-core run` that take a value (consume the next arg
+/// unless written as `--flag=value`).
+const RUN_VALUE_FLAGS: &[&str] = &[
+    "--channel",
+    "--target",
+    "--max-lines",
+    "--max-bytes",
+    "--failure-max-lines",
+    "--per-group-limit",
+    "--adapter",
+    "--invoked-as-shim",
+];
+const RUN_BOOL_FLAGS: &[&str] = &[
+    "--shell",
+    "--full",
+    "--no-compact",
+    "--no-raw",
+    "--no-redact",
+    "--json",
+    "--list-adapters",
+];
+
 fn positional_after_options(arguments: &[String]) -> Vec<String> {
     if let Some(index) = arguments.iter().position(|argument| argument == "--") {
         return arguments[index + 1..].to_vec();
@@ -3618,23 +3640,63 @@ fn positional_after_options(arguments: &[String]) -> Vec<String> {
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
-        if argument.starts_with("--channel")
-            || argument.starts_with("--max-lines")
-            || argument.starts_with("--max-bytes")
-        {
-            if !argument.contains('=') {
-                index += 2;
-            } else {
-                index += 1;
-            }
+        if let Some(skip) = consume_value_flag(argument, RUN_VALUE_FLAGS) {
+            index += skip;
             continue;
         }
-        if argument == "--shell" {
+        if RUN_BOOL_FLAGS.iter().any(|flag| argument == flag) {
             index += 1;
             continue;
         }
         output.extend(arguments[index..].iter().cloned());
         break;
+    }
+    output
+}
+
+/// If `argument` matches any name in `value_flags` (either as `--flag` or
+/// `--flag=value`), return how many arguments to consume (1 for `--flag=value`
+/// or short form, 2 for `--flag value`).
+fn consume_value_flag(argument: &str, value_flags: &[&str]) -> Option<usize> {
+    for flag in value_flags {
+        if argument == *flag {
+            return Some(2);
+        }
+        if argument.starts_with(&format!("{flag}=")) {
+            return Some(1);
+        }
+    }
+    None
+}
+
+/// Collect positional arguments, skipping the values of known value-taking
+/// flags and any boolean flags.
+fn collect_positional(
+    arguments: &[String],
+    value_flags: &[&str],
+    bool_flags: &[&str],
+) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if let Some(skip) = consume_value_flag(argument, value_flags) {
+            index += skip;
+            continue;
+        }
+        if bool_flags.iter().any(|flag| argument == flag) {
+            index += 1;
+            continue;
+        }
+        if argument.starts_with("--") {
+            // Unknown flag — skip the flag itself; we don't know if it takes a
+            // value, so we err on the side of treating it as boolean. Callers
+            // that care should list their flags above.
+            index += 1;
+            continue;
+        }
+        output.push(argument.clone());
+        index += 1;
     }
     output
 }
@@ -3979,6 +4041,68 @@ mod tests {
             "both".to_string(),
         ];
         assert!(flag_value(arguments_before_separator(&args), "--channel").is_none());
+    }
+
+    #[test]
+    fn positional_after_options_strips_new_run_flags_without_separator() {
+        let args: Vec<String> = vec![
+            "--full",
+            "--json",
+            "--no-redact",
+            "--target",
+            "windsurf",
+            "--failure-max-lines",
+            "300",
+            "--adapter",
+            "generic",
+            "cargo",
+            "test",
+            "--workspace",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let positional = positional_after_options(&args);
+        assert_eq!(
+            positional,
+            vec![
+                "cargo".to_string(),
+                "test".to_string(),
+                "--workspace".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_positional_skips_value_flag_values_for_raw() {
+        let args: Vec<String> = vec!["--channel", "next", "--target", "windsurf", "list"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let positional = collect_positional(&args, RAW_VALUE_FLAGS, RAW_BOOL_FLAGS);
+        assert_eq!(positional, vec!["list".to_string()]);
+
+        let raw_id_args: Vec<String> = vec!["--channel", "next", "20260512-003044-abc12345"]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let positional = collect_positional(&raw_id_args, RAW_VALUE_FLAGS, RAW_BOOL_FLAGS);
+        assert_eq!(positional, vec!["20260512-003044-abc12345".to_string()]);
+    }
+
+    #[test]
+    fn collect_positional_skips_value_flag_values_for_replay() {
+        let args: Vec<String> = vec![
+            "--channel",
+            "next",
+            "--allow-risky",
+            "20260512-003044-abc12345",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+        let positional = collect_positional(&args, REPLAY_VALUE_FLAGS, REPLAY_BOOL_FLAGS);
+        assert_eq!(positional, vec!["20260512-003044-abc12345".to_string()]);
     }
 
     #[test]
