@@ -930,21 +930,25 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                     .output();
                 match output {
                     Ok(output) => {
+                        let exit_code = output.status.code().unwrap_or(1);
                         let compact = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         if !stderr.is_empty() {
                             let _ = io::stderr().write_all(stderr.as_bytes());
                             let _ = io::stderr().flush();
                         }
+                        let mut reason =
+                            format!("Command auto-proxied through wf-core:\n{}", compact);
+                        if !stderr.is_empty() {
+                            reason.push_str(&format!("\n[stderr]\n{}", stderr));
+                        }
+                        reason.push_str(&format!("\n[exit code: {}]", exit_code));
                         println!(
                             "{{\"decision\":\"block\",\"reason\":{}}}",
-                            json_string(&format!(
-                                "Command auto-proxied through wf-core:\n{}",
-                                compact
-                            ))
+                            json_string(&reason)
                         );
                         let _ = io::stdout().flush();
-                        std::process::exit(0);
+                        std::process::exit(exit_code);
                     }
                     Err(e) => {
                         return Err(AppError::new(format!(
