@@ -161,11 +161,15 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
     };
 
     // Optionally redact possible secrets in the compact text. Raw output is
-    // never altered: it is local recovery data.
+    // never altered: it is local recovery data. Adapters that embed the full
+    // compact body into `summary` (and leave stdout/stderr empty) still get
+    // redacted because we run the same scrub on `summary`.
     let mut final_result = result;
     if !options.no_redact {
+        let (redacted_summary, _) = redact_secrets(&final_result.summary);
         let (redacted_stdout, _) = redact_secrets(&final_result.stdout);
         let (redacted_stderr, _) = redact_secrets(&final_result.stderr);
+        final_result.summary = redacted_summary;
         final_result.stdout = redacted_stdout;
         final_result.stderr = redacted_stderr;
     }
@@ -312,6 +316,34 @@ mod tests {
         )
         .unwrap();
         assert!(report.result.stdout.contains("[redacted possible secret"));
+        let _ = std::fs::remove_dir_all(&scratch);
+        env::remove_var("WF_CORE_HOME");
+    }
+
+    #[test]
+    fn redact_default_strips_secrets_from_compacted_summary() {
+        let scratch = env::temp_dir().join(format!("wf-core-redact-summary-{}", now_unix_ms()));
+        env::set_var("WF_CORE_HOME", &scratch);
+        let opts = RunOptions {
+            channel: "next".to_string(),
+            shell_mode: true,
+            ..RunOptions::default()
+        };
+        // Force compaction by emitting more lines than the default max_lines (120).
+        let cmd = "for i in $(seq 1 200); do echo line $i; done; echo GITHUB_TOKEN=ghp_supersecret"
+            .to_string();
+        let report = run_proxy(&vec![cmd], opts).unwrap();
+        assert!(report.result.compacted, "expected output to be compacted");
+        assert!(
+            report.result.summary.contains("[redacted possible secret"),
+            "summary should be redacted, was:\n{}",
+            report.result.summary
+        );
+        assert!(
+            !report.result.summary.contains("ghp_supersecret"),
+            "secret token leaked in compact summary:\n{}",
+            report.result.summary
+        );
         let _ = std::fs::remove_dir_all(&scratch);
         env::remove_var("WF_CORE_HOME");
     }

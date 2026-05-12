@@ -101,9 +101,12 @@ pub fn read_events(path: &Path) -> Result<Vec<GainEventV2>, AppError> {
 fn parse_event(line: &str) -> Option<GainEventV2> {
     let schema_version = crate::json_number_field(line, "schemaVersion").unwrap_or(1) as u32;
     let compacted = crate::json_bool_field(line, "compacted").unwrap_or(false);
+    // v2 events use millisecond timestamps; the legacy v1 `time` field is in
+    // seconds since epoch, so multiply by 1000 when falling back.
     let timestamp_unix_ms = crate::json_number_field(line, "timestampUnixMs")
-        .or_else(|| crate::json_number_field(line, "time"))
-        .unwrap_or(0) as u128;
+        .map(|value| value as u128)
+        .or_else(|| crate::json_number_field(line, "time").map(|value| (value as u128) * 1000))
+        .unwrap_or(0);
     let raw_id = crate::json_string_field(line, "rawId").unwrap_or_default();
     let command = crate::json_string_field(line, "command").unwrap_or_default();
     let cwd = crate::json_string_field(line, "cwd").unwrap_or_default();
@@ -181,6 +184,13 @@ mod tests {
         assert_eq!(event.estimated_tokens_before, 100); // 400/4
         assert_eq!(event.estimated_tokens_after, 10);
         assert_eq!(event.estimated_tokens_saved, 90);
+    }
+
+    #[test]
+    fn upgrades_legacy_v1_timestamp_from_seconds_to_milliseconds() {
+        let line = "{\"time\":1700000000,\"command\":\"echo hi\",\"exitCode\":0,\"compacted\":true,\"rawBytes\":400,\"compactedBytes\":40,\"savedBytes\":360,\"highSignalCount\":3,\"rawPath\":\"/tmp/raw\"}";
+        let event = parse_event(line).unwrap();
+        assert_eq!(event.timestamp_unix_ms, 1_700_000_000_000);
     }
 
     #[test]
