@@ -1,0 +1,243 @@
+name: Release Native CLI
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to publish, for example v2026.05.12.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.release-metadata.outputs.release_tag }}
+      build_version: ${{ steps.release-metadata.outputs.build_version }}
+      release_notes: ${{ steps.release-metadata.outputs.release_notes }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: release-metadata
+        shell: bash
+        run: |
+          normalize_release_tag() {
+            local raw_release_tag=$1
+            if [[ -z "$raw_release_tag" ]]; then
+              echo "workflow_dispatch requires an explicit release tag." >&2
+              exit 1
+            fi
+            if [[ "$raw_release_tag" == v* || "$raw_release_tag" == bootstrap-* ]]; then
+              printf '%s\n' "$raw_release_tag"
+              return 0
+            fi
+            if [[ "$raw_release_tag" == [0-9]* ]]; then
+              printf 'v%s\n' "$raw_release_tag"
+              return 0
+            fi
+            printf '%s\n' "$raw_release_tag"
+          }
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            release_tag="$(normalize_release_tag "${{ github.event.inputs.release_tag }}")"
+            release_notes="Native wf-core release assets for one-command global install and proxy activation."
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="$(normalize_release_tag "${GITHUB_REF_NAME}")"
+            release_notes="Native wf-core release assets for one-command global install and proxy activation."
+          else
+            release_tag="bootstrap-${GITHUB_SHA::12}"
+            release_notes="Bootstrap wf-core release assets for main branch commit ${GITHUB_SHA}."
+          fi
+
+          if [[ "$release_tag" == v[0-9]* ]]; then
+            build_version="${release_tag#v}"
+          else
+            build_version="$release_tag"
+          fi
+
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "build_version=$build_version" >> "$GITHUB_OUTPUT"
+          echo "release_notes=$release_notes" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release candidate
+        shell: bash
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo build --release --locked
+
+          export CODEIUM_HOME="$RUNNER_TEMP/codeium"
+          export DEVIN_HOME="$RUNNER_TEMP/devin"
+          export WF_CORE_HOME="$RUNNER_TEMP/wf-core"
+          ./target/release/wf-core install --target all --channel next --source-root "$PWD"
+          ./target/release/wf-core verify --target all --channel next
+          ./target/release/wf-core doctor --proxy --target all --channel next || true
+
+  build-release-assets:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }} release asset
+    needs: release-preflight
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            executable: wf-core
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            executable: wf-core
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            executable: wf-core.exe
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve archive metadata
+        id: archive-metadata
+        shell: bash
+        run: |
+          build_version="${{ needs.release-preflight.outputs.build_version }}"
+          archive_extension=".tar.gz"
+          if [[ "${{ matrix.os }}" == "windows" ]]; then
+            archive_extension=".zip"
+          fi
+
+          target_directory="dist/${{ matrix.os }}-${{ matrix.arch }}"
+          archive_file_name="wf-core_${build_version}_${{ matrix.os }}_${{ matrix.arch }}${archive_extension}"
+          archive_path="dist/${archive_file_name}"
+          executable_path="${target_directory}/${{ matrix.executable }}"
+
+          mkdir -p "$target_directory"
+
+          echo "archive_file_name=${archive_file_name}" >> "$GITHUB_OUTPUT"
+          echo "archive_path=${archive_path}" >> "$GITHUB_OUTPUT"
+          echo "executable_path=${executable_path}" >> "$GITHUB_OUTPUT"
+          echo "target_directory=${target_directory}" >> "$GITHUB_OUTPUT"
+
+      - name: Build native CLI
+        shell: bash
+        run: |
+          cargo build --release --locked
+          cp "target/release/${{ matrix.executable }}" "${{ steps.archive-metadata.outputs.executable_path }}"
+
+      - name: Stage release bundle
+        shell: bash
+        run: |
+          target_directory="${{ steps.archive-metadata.outputs.target_directory }}"
+          build_version="${{ needs.release-preflight.outputs.build_version }}"
+          release_tag="${{ needs.release-preflight.outputs.release_tag }}"
+          archive_file_name="${{ steps.archive-metadata.outputs.archive_file_name }}"
+
+          cp README.md AGENTS.md install.sh install.ps1 install.cmd "$target_directory"/
+          cp -R .windsurf "$target_directory/.windsurf"
+          cp -R docs "$target_directory/docs"
+          if [[ -d templates ]]; then
+            cp -R templates "$target_directory/templates"
+          fi
+
+          cat > "${target_directory}/wf-core-release-manifest.json" <<EOF
+          {
+            "package_kind": "packaged_release_bundle",
+            "repository_slug": "${{ github.repository }}",
+            "release_tag": "${release_tag}",
+            "build_version": "${build_version}",
+            "archive_file_name": "${archive_file_name}"
+          }
+          EOF
+
+      - name: Package archive
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path '${{ steps.archive-metadata.outputs.target_directory }}/*' -DestinationPath '${{ steps.archive-metadata.outputs.archive_path }}' -Force"
+            exit 0
+          fi
+
+          tar -C "${{ steps.archive-metadata.outputs.target_directory }}" -czf "${{ steps.archive-metadata.outputs.archive_path }}" .
+
+      - name: Upload packaged archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ steps.archive-metadata.outputs.archive_path }}
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    needs:
+      - release-preflight
+      - build-release-assets
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download packaged archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<EOF
+          # wf-core ${{ needs.release-preflight.outputs.release_tag }}
+
+          ${{ needs.release-preflight.outputs.release_notes }}
+
+          ## One-command install
+
+          macOS/Linux/WSL:
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+          \`\`\`
+
+          Windows PowerShell:
+
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+          \`\`\`
+
+          Archives include the native binary plus the managed Windsurf/Devin payload needed by \`wf-core install\`.
+          EOF
+
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          release_tag="${{ needs.release-preflight.outputs.release_tag }}"
+          if ! gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release create "$release_tag" \
+              --target "$GITHUB_SHA" \
+              --title "$release_tag" \
+              --generate-notes \
+              --notes-file release-notes.md
+          fi
+
+      - name: Upload release assets
+        shell: bash
+        run: gh release upload "${{ needs.release-preflight.outputs.release_tag }}" release-assets/* --clobber

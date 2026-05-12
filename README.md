@@ -47,43 +47,34 @@ Install writes only to global agent homes, not to an arbitrary user workspace:
 
 ## Quick Install
 
-Prerequisites:
+The default installer downloads the latest GitHub release archive for your
+platform, extracts the bundled native `wf-core` binary and managed payload, then
+installs global Windsurf/Windsurf Next/Devin surfaces. No clone or Rust toolchain
+is required for the normal path.
 
-- Git, for cloning the repository.
-- Rust/Cargo, for building the native `wf-core` binary from source.
-
-Clone once:
+macOS, Linux, WSL, or Git Bash:
 
 ```bash
-git clone https://github.com/UntaDotMy/wf_core.git
-cd wf_core
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-.\install.ps1 -Target all -Channel both
-& "$env:APPDATA\devin\wf-core\wf-core.exe" doctor --target all --channel both
+irm https://raw.githubusercontent.com/UntaDotMy/wf_core/main/install.ps1 | iex
 ```
 
-macOS, Linux, WSL, or Git Bash:
+The installer defaults to `--target all --channel both`, verifies the install,
+runs proxy doctor, and prints the shell activation command. Restart Windsurf,
+Windsurf Next, and Devin for Terminal after install so global surfaces refresh.
+
+Source checkout install is still available for development:
 
 ```bash
-./install.sh --target all --channel both
-~/.config/devin/wf-core/wf-core doctor --target all --channel both
+git clone https://github.com/UntaDotMy/wf_core.git
+cd wf_core
+./install.sh --from-source --target all --channel both
 ```
-
-Windows CMD:
-
-```bat
-install.cmd -Target all -Channel both
-%APPDATA%\devin\wf-core\wf-core.exe doctor --target all --channel both
-```
-
-The installer builds the Rust binary with Cargo, copies that binary globally,
-and installs global instructions, skills, workflows, Devin agents, Devin hooks,
-memory support, and hook-equivalent terminal policy. Restart Windsurf, Windsurf
-Next, and Devin for Terminal after install so global surfaces refresh.
 
 Successful install shows:
 

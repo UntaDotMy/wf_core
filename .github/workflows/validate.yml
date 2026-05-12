@@ -16,13 +16,16 @@ jobs:
         run: cargo test --locked
       - name: Rust build
         run: cargo build --release --locked
+      - name: Installer syntax
+        run: |
+          bash -n install.sh
+          pwsh -NoProfile -Command '[scriptblock]::Create((Get-Content -Raw "install.ps1")) | Out-Null'
       - name: Global install smoke
         run: |
           export CODEIUM_HOME="$RUNNER_TEMP/codeium"
           export DEVIN_HOME="$RUNNER_TEMP/devin"
           export WF_CORE_HOME="$RUNNER_TEMP/wf-core"
-          ./target/release/wf-core install --target all --channel next --source-root "$PWD"
-          ./target/release/wf-core verify --target all --channel next
+          bash install.sh --from-source --target all --channel next
           test -f "$RUNNER_TEMP/codeium/windsurf-next/wf-core/manifest.tsv"
           test -f "$RUNNER_TEMP/devin/wf-core/manifest.tsv"
           grep -q wf-core "$RUNNER_TEMP/devin/config.json"
