@@ -63,7 +63,10 @@ impl CommandAdapter for CurlAdapter {
                 build.push_line(&format!("  {h}"));
             }
             if headers.len() > 20 {
-                build.push_line(&format!("  ... ({} more headers elided)", headers.len() - 20));
+                build.push_line(&format!(
+                    "  ... ({} more headers elided)",
+                    headers.len() - 20
+                ));
             }
         }
 
@@ -86,17 +89,25 @@ impl CommandAdapter for CurlAdapter {
             let head: Vec<&str> = stdout_text.lines().take(head_cap).collect();
             if !head.is_empty() {
                 build.push_line("");
-                build.push_line(&format!("body (first {} of {} lines):", head.len(), body_lines));
+                build.push_line(&format!(
+                    "body (first {} of {} lines):",
+                    head.len(),
+                    body_lines
+                ));
                 for line in head {
                     build.push_line(line);
                 }
                 if body_lines > head_cap {
-                    build.push_line(&format!("... ({} more lines elided)", body_lines - head_cap));
+                    build.push_line(&format!(
+                        "... ({} more lines elided)",
+                        body_lines - head_cap
+                    ));
                 }
             }
         }
 
-        let compacted = body_lines > budget.max_lines / 4 || run.exit_code != 0 || !diagnostics.is_empty();
+        let compacted =
+            body_lines > budget.max_lines / 4 || run.exit_code != 0 || !diagnostics.is_empty();
         build.finish(run, meta, compacted)
     }
 }
@@ -124,13 +135,21 @@ fn extract_diagnostics(stderr: &str) -> Vec<String> {
     let mut diags: Vec<String> = Vec::new();
     for line in stderr.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('<') || trimmed.starts_with('>') {
+        if trimmed.is_empty()
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('<')
+            || trimmed.starts_with('>')
+        {
             continue;
         }
         let lowered = trimmed.to_ascii_lowercase();
-        if lowered.contains("error") || lowered.contains("failed") || lowered.contains("unable")
-            || lowered.contains("could not") || lowered.contains("timeout")
-            || lowered.contains("refused") || lowered.contains("not found")
+        if lowered.contains("error")
+            || lowered.contains("failed")
+            || lowered.contains("unable")
+            || lowered.contains("could not")
+            || lowered.contains("timeout")
+            || lowered.contains("refused")
+            || lowered.contains("not found")
         {
             // Strip leading curl metadata.
             let clean = trimmed

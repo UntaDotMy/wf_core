@@ -112,13 +112,21 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
         // npm summary lines
         if let Some(rest) = trimmed.strip_prefix("added ") {
             if rest.contains("package") {
-                let count: usize = rest.split_whitespace().next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                let count: usize = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(0);
                 added += count;
             }
         }
         if let Some(rest) = trimmed.strip_prefix("removed ") {
             if rest.contains("package") {
-                let count: usize = rest.split_whitespace().next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                let count: usize = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|w| w.parse().ok())
+                    .unwrap_or(0);
                 removed += count;
             }
         }
@@ -133,7 +141,11 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
 
         // npm audit
         if let Some(rest) = trimmed.strip_prefix("found ") {
-            let _vuln_count: usize = rest.split_whitespace().next().and_then(|w| w.parse().ok()).unwrap_or(0);
+            let _vuln_count: usize = rest
+                .split_whitespace()
+                .next()
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(0);
         }
         if trimmed.contains("vulnerabilities") || trimmed.contains("vulnerability") {
             let num: usize = trimmed
@@ -233,7 +245,10 @@ fn extract_fallback(text: &str, build: &mut AdapterBuild, _budget: &OutputBudget
         }
     }
     if info_lines.len() > 4 {
-        build.push_line(&format!("  {total_lines} total lines, {} info signals", info_lines.len()));
+        build.push_line(&format!(
+            "  {total_lines} total lines, {} info signals",
+            info_lines.len()
+        ));
         for line in info_lines.iter().take(10) {
             build.push_line(&format!("  {line}"));
         }
