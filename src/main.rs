@@ -48,11 +48,19 @@ const OLD_MANAGED_WORKFLOW_NAMES: &[&str] = &[
 const MANIFEST_FILE_NAME: &str = "manifest.tsv";
 
 const NOISY_ROOT_COMMANDS: &[&str] = &[
+    "ansible",
+    "ansible-playbook",
     "bun",
     "cargo",
+    "cmake",
+    "cpack",
+    "ctest",
+    "curl",
     "docker",
     "docker-compose",
     "dotnet",
+    "eslint",
+    "gh",
     "go",
     "gradle",
     "gradlew",
@@ -64,10 +72,19 @@ const NOISY_ROOT_COMMANDS: &[&str] = &[
     "mvn",
     "node",
     "npm",
+    "npx",
+    "pip",
+    "pip3",
     "pnpm",
+    "prettier",
     "pytest",
+    "ruff",
+    "rsync",
+    "ssh",
     "terraform",
     "tsc",
+    "vitest",
+    "wget",
     "yarn",
 ];
 
@@ -891,6 +908,7 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
         .unwrap_or("pre-tool-use");
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
+
     match hook_kind {
         "pre-tool-use" => {
             let command = json_string_field(&input, "command").unwrap_or_default();
@@ -902,16 +920,15 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
             }
             let (supported, _) = is_supported_noisy_command(&command);
             if supported {
-                // Auto-proxy: execute the noisy command through wf-core run and
-                // return compacted output directly.  This avoids the "Tool blocked"
-                // state entirely, so both cheap and expensive models see the same
-                // result without needing to recover from a block message.
+                // Transparent auto-rewrite: proxy the command through wf-core run
+                // and return compacted output. No "block" state, no fallback —
+                // every model sees the same result regardless of size.
                 let exe = env::current_exe()?;
-                let output_result = std::process::Command::new(&exe)
+                let output = std::process::Command::new(&exe)
                     .args(["run", "--shell", "--", &command])
                     .stdin(std::process::Stdio::null())
                     .output();
-                match output_result {
+                match output {
                     Ok(output) => {
                         let exit_code = output.status.code().unwrap_or(1);
                         let compact = String::from_utf8_lossy(&output.stdout);
@@ -924,6 +941,12 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                             reason.push_str("\nstderr:\n");
                             reason.push_str(&stderr);
                         }
+                        let mut reason =
+                            format!("Command auto-proxied through wf-core:\n{}", compact);
+                        if !stderr.is_empty() {
+                            reason.push_str(&format!("\n[stderr]\n{}", stderr));
+                        }
+                        reason.push_str(&format!("\n[exit code: {}]", exit_code));
                         println!(
                             "{{\"decision\":\"block\",\"reason\":{}}}",
                             json_string(&reason)
@@ -932,17 +955,9 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                         std::process::exit(exit_code);
                     }
                     Err(e) => {
-                        // Fallback: emit the block message so the framework still
-                        // surfaces a rerun suggestion.
-                        let wrapper = current_wrapper_command()?;
-                        eprintln!("[wf-core] auto-proxy failed ({e}); falling back to block");
-                        println!(
-                            "{{\"decision\":\"block\",\"reason\":{}}}",
-                            json_string(&format!(
-                                "Rerun that as: {wrapper} run --shell -- {}",
-                                quote_arg(&command)
-                            ))
-                        );
+                        return Err(AppError::new(format!(
+                            "auto-proxy failed: {e}; cannot run command"
+                        )));
                     }
                 }
             }

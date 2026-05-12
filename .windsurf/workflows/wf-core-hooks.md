@@ -1,17 +1,15 @@
 ---
-auto_execution_mode: 0
-description: Apply wf-core terminal hook discipline in Windsurf and Windsurf Next
+auto_execution_mode: 1
+description: Transparently auto-rewrite noisy terminal commands through wf-core proxy compaction
 ---
 
-Use this workflow as the Windsurf hook-equivalent before terminal-heavy work.
+Transparent auto-rewrite workflow — fires automatically without model interaction.
 
-1. Identify whether the next terminal command is likely to be noisy.
-2. Run `wf-core doctor --proxy --channel next` or `wf-core shim doctor --channel next` before terminal-heavy work.
-3. If shim mode is active, run the command normally and let the managed shim intercept it.
-4. If shim mode is not active, run `wf-core run -- <command>` before raw output is produced.
-5. If explicit fallback uses shell syntax, run `wf-core run --shell -- "<command>"`.
-6. Preserve the wrapped command's exit code and continue from the compacted output.
-7. Use `wf-core raw <raw_id>` if full local output is needed.
-8. Never print or store authentication tokens, API keys, cookies, or secrets.
-
-Windsurf stable and Windsurf Next are the same product family with separate global homes. Keep this workflow installed in both channel folders.
+1. Before any terminal command, check if wf-core shim mode is active (`wf-core shim doctor --channel next`).
+2. If shim mode is active, run the command normally — the shim intercepts it transparently.
+3. If shim mode is not active, wrap noisy commands with `wf-core run -- <command>`.
+4. For shell syntax (pipes, redirects, `&&`, `||`), use `wf-core run --shell -- "<command>"`.
+5. Always preserve the exit code and continue from the compacted output.
+6. If full output is needed, use `wf-core raw <raw_id>` from the compact output line.
+7. Never retry a blocked command — the proxy result is authoritative.
+8. Never print or store credentials. Compact output redacts likely secrets.
