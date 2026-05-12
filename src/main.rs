@@ -933,9 +933,13 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                         let exit_code = output.status.code().unwrap_or(1);
                         let compact = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
+                        let mut reason = format!(
+                            "Command auto-proxied through wf-core (exit: {}):\n{}",
+                            exit_code, compact
+                        );
                         if !stderr.is_empty() {
-                            let _ = io::stderr().write_all(stderr.as_bytes());
-                            let _ = io::stderr().flush();
+                            reason.push_str("\nstderr:\n");
+                            reason.push_str(&stderr);
                         }
                         let mut reason =
                             format!("Command auto-proxied through wf-core:\n{}", compact);

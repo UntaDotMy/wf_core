@@ -154,6 +154,10 @@ fn classify_normalized(program: &str, args: &[String], has_shell: bool) -> Comma
         // Files
         "cat" | "head" | "tail" | "sed" => CommandKind::FileRead,
         "ls" | "find" | "tree" | "dir" => CommandKind::FileList,
+        // Package managers
+        "pip" | "pip3" => CommandKind::PackageManager,
+        // HTTP clients
+        "curl" | "wget" => CommandKind::FileRead,
         // Build/lint
         "tsc" => CommandKind::Build,
         "eslint" | "biome" | "prettier" | "ruff" | "mypy" | "pyright" => CommandKind::Lint,
