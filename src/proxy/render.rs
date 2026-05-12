@@ -123,15 +123,13 @@ pub fn strip_ansi(text: &str) -> String {
                     }
                 }
                 // OSC: \x1b] ... \x07 (bell) or \x1b\\ (ST)
-                Some(']') => {
-                    loop {
-                        match chars.next() {
-                            None | Some('\x07') => break,
-                            Some('\x1b') if chars.next() == Some('\\') => break,
-                            _ => {}
-                        }
+                Some(']') => loop {
+                    match chars.next() {
+                        None | Some('\x07') => break,
+                        Some('\x1b') if chars.next() == Some('\\') => break,
+                        _ => {}
                     }
-                }
+                },
                 // Two-character sequences: \x1b<letter>
                 Some(c) if c.is_ascii_alphabetic() => {
                     // consume single char escape like \x1bM (RI)
