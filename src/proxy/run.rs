@@ -214,9 +214,15 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
         };
     }
 
-    // Update compact byte counts to reflect stripped output.
-    final_result.compact_stdout_bytes = final_result.stdout.len();
-    final_result.compact_stderr_bytes = final_result.stderr.len();
+    // Update compact byte counts to reflect stripped output. Only update
+    // when the adapter actually populated the field (some adapters embed the
+    // body in summary and leave stdout/stderr empty, with correct sizes set).
+    if !final_result.stdout.is_empty() {
+        final_result.compact_stdout_bytes = final_result.stdout.len();
+    }
+    if !final_result.stderr.is_empty() {
+        final_result.compact_stderr_bytes = final_result.stderr.len();
+    }
 
     if !options.no_redact {
         let (redacted_summary, _) = redact_secrets(&final_result.summary);
