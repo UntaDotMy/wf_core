@@ -22,6 +22,6 @@ pub use registry::default_registry;
 pub use run::{list_raw_runs, print_raw, print_raw_path, run_proxy, RunOptions};
 pub use safety::{is_destructive, is_interactive_command};
 pub use shim::{
-    dispatch_command, install_shims, list_shims, print_shell_init, shim_dir, shim_doctor,
-    uninstall_shims, DispatchOptions, ShellInitOptions, ShimInstallOptions,
+    dispatch_command, install_shims, install_shims_with_binary, list_shims, print_shell_init,
+    shim_dir, shim_doctor, uninstall_shims, DispatchOptions, ShellInitOptions, ShimInstallOptions,
 };

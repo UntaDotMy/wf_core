@@ -8,17 +8,20 @@ When a `wf-core` command owns the job, use it instead of recreating the
 behavior with raw shell, generic search, or ad hoc instructions.
 
 Token-saving rule: prevent noisy command output from entering the agent context.
-Do not run a raw noisy command first and compact afterward. Route through
-`wf-core run -- <command>` before output is produced.
+Do not run a raw noisy command first and compact afterward. Route through the
+native wf-core proxy before output is produced: use managed shims when active,
+or `wf-core run -- <command>` as the explicit fallback.
 
-Use the wrapper for tests, builds, lints, logs, broad search, status, Docker,
-Kubernetes, Terraform, package managers, and CI-style commands.
+Use the proxy for tests, builds, lints, logs, broad search, status, Docker,
+Kubernetes, Terraform, package managers, and CI-style commands. Check automatic
+mode with `wf-core doctor --proxy --channel next` or `wf-core shim doctor`.
 
 If `wf-core` is not on PATH, use the installed binary path from the active agent
 home, such as `%USERPROFILE%\.codeium\windsurf-next\wf-core\wf-core.exe` or
 `%APPDATA%\devin\wf-core\wf-core.exe` on Windows.
 
-If a command contains pipes, redirects, `&&`, `||`, or command substitution, use:
+If shim mode is not active and a command contains pipes, redirects, `&&`, `||`,
+or command substitution, use:
 
 ```bash
 wf-core run --shell -- "<command>"
@@ -38,6 +41,9 @@ wf-core rewrite "<command>"
 - Raw command output is saved locally under `~/.codeium/<channel>/wf-core/raw-output/`.
   Do not run commands that print secrets unless the user explicitly asks and
   approves the local risk.
+- Windsurf rules/workflows are not themselves a terminal interceptor. Real
+  automatic saving requires wf-core-managed shims; Devin additionally has
+  PreToolUse hook support.
 
 ## Skill Routing
 
