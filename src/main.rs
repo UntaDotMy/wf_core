@@ -902,16 +902,50 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
             }
             let (supported, _) = is_supported_noisy_command(&command);
             if supported {
-                let wrapper = current_wrapper_command()?;
-                let rerun = if requires_shell(&command) {
-                    format!("{wrapper} run --shell -- {}", quote_arg(&command))
-                } else {
-                    format!("{wrapper} run -- {command}")
-                };
-                println!(
-                    "{{\"decision\":\"block\",\"reason\":{}}}",
-                    json_string(&format!("Rerun that as: {rerun}"))
-                );
+                // Auto-proxy: execute the noisy command through wf-core run and
+                // return compacted output directly.  This avoids the "Tool blocked"
+                // state entirely, so both cheap and expensive models see the same
+                // result without needing to recover from a block message.
+                let exe = env::current_exe()?;
+                let output_result = std::process::Command::new(&exe)
+                    .args(["run", "--shell", "--", &command])
+                    .stdin(std::process::Stdio::null())
+                    .output();
+                match output_result {
+                    Ok(output) => {
+                        let compact = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        // Emit block JSON with the compact output as the reason so
+                        // Devin doesn't execute the original command (double execution).
+                        // The agent sees the compact output in the block message.
+                        if !stderr.is_empty() {
+                            let _ = io::stderr().write_all(stderr.as_bytes());
+                            let _ = io::stderr().flush();
+                        }
+                        println!(
+                            "{{\"decision\":\"block\",\"reason\":{}}}",
+                            json_string(&format!(
+                                "Command auto-proxied through wf-core:\n{}",
+                                compact
+                            ))
+                        );
+                        let _ = io::stdout().flush();
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        // Fallback: emit the block message so the framework still
+                        // surfaces a rerun suggestion.
+                        let wrapper = current_wrapper_command()?;
+                        eprintln!("[wf-core] auto-proxy failed ({e}); falling back to block");
+                        println!(
+                            "{{\"decision\":\"block\",\"reason\":{}}}",
+                            json_string(&format!(
+                                "Rerun that as: {wrapper} run --shell -- {}",
+                                quote_arg(&command)
+                            ))
+                        );
+                    }
+                }
             }
             Ok(0)
         }
@@ -3912,7 +3946,7 @@ fn devin_pre_tool_use_entry_json(binary: &Path) -> String {
         quote_arg(&display_path(binary))
     );
     format!(
-        "{{\n        \"matcher\": \"exec\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {}, \"timeout\": 5 }}]\n      }}",
+        "{{\n        \"matcher\": \"exec\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {}, \"timeout\": 300 }}]\n      }}",
         json_string(&command)
     )
 }
