@@ -11,6 +11,7 @@ use super::raw_store::{
     write_meta_json, ProxyTarget, RawRunSummary,
 };
 use super::registry::default_registry;
+use super::render::strip_ansi;
 use super::safety::{is_interactive_command, redact_secrets};
 use super::shell::execute_command_with_env;
 use super::token_meter::TokenMeter;
@@ -182,6 +183,47 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
     // compact body into `summary` (and leave stdout/stderr empty) still get
     // redacted because we run the same scrub on `summary`.
     let mut final_result = result;
+
+    // Strip ANSI escape sequences from all output fields so the compact text
+    // is clean before redaction and writing.
+    let pre_strip_summary = final_result.summary.clone();
+    let pre_strip_stdout = final_result.stdout.clone();
+    let pre_strip_stderr = final_result.stderr.clone();
+    final_result.summary = strip_ansi(&final_result.summary);
+    final_result.stdout = strip_ansi(&final_result.stdout);
+    final_result.stderr = strip_ansi(&final_result.stderr);
+
+    // Adjust token estimate by the ratio of bytes stripped via ANSI removal.
+    // The adapter already computed the correct savings; we just adjust for the
+    // small additional compression from stripping escape sequences.
+    let pre_len = pre_strip_summary.len() + pre_strip_stdout.len() + pre_strip_stderr.len();
+    let post_len =
+        final_result.summary.len() + final_result.stdout.len() + final_result.stderr.len();
+    if pre_len > 0 && post_len < pre_len {
+        let ratio = post_len as f64 / pre_len as f64;
+        let adjusted_after = (final_result.estimated_tokens_after as f64 * ratio).round() as usize;
+        final_result.estimated_tokens_after = adjusted_after;
+        final_result.estimated_tokens_saved =
+            final_result.estimated_tokens_before as isize - adjusted_after as isize;
+        final_result.savings_pct = if final_result.estimated_tokens_before > 0 {
+            (final_result.estimated_tokens_saved as f64
+                / final_result.estimated_tokens_before as f64)
+                * 100.0
+        } else {
+            0.0
+        };
+    }
+
+    // Update compact byte counts to reflect stripped output. Only update
+    // when the adapter actually populated the field (some adapters embed the
+    // body in summary and leave stdout/stderr empty, with correct sizes set).
+    if !final_result.stdout.is_empty() {
+        final_result.compact_stdout_bytes = final_result.stdout.len();
+    }
+    if !final_result.stderr.is_empty() {
+        final_result.compact_stderr_bytes = final_result.stderr.len();
+    }
+
     if !options.no_redact {
         let (redacted_summary, _) = redact_secrets(&final_result.summary);
         let (redacted_stdout, _) = redact_secrets(&final_result.stdout);

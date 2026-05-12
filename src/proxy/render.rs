@@ -104,6 +104,90 @@ pub fn head_tail_snapshot(text: &str, max_lines: usize, max_bytes: usize) -> (St
     (output, included)
 }
 
+/// Strip ANSI escape sequences from text.
+///
+/// Handles CSI sequences (`\x1b[<params><final>`) and OSC sequences
+/// (`\x1b]<string>\x07` or `\x1b]<string>\x1b\\`).  Returns clean text.
+pub fn strip_ansi(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.next() {
+                // CSI: \x1b[ params... final
+                Some('[') => {
+                    for c in &mut chars {
+                        if c.is_ascii_alphabetic() || c == '~' {
+                            break;
+                        }
+                    }
+                }
+                // OSC: \x1b] ... \x07 (bell) or \x1b\\ (ST)
+                Some(']') => loop {
+                    match chars.next() {
+                        None | Some('\x07') => break,
+                        Some('\x1b') => {
+                            // Peek ahead for ST terminator (\x1b\\) without
+                            // consuming the next char if it isn't \\.
+                            let mut peek = chars.clone();
+                            match peek.next() {
+                                Some('\\') => {
+                                    chars.next(); // consume the \\
+                                    break;
+                                }
+                                _ => {} // not ST, continue
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+                // Two-character sequences: \x1b<letter>
+                Some(c) if c.is_ascii_alphabetic() => {
+                    // consume single char escape like \x1bM (RI)
+                }
+                other => {
+                    // Unknown escape — emit raw if incomplete.
+                    output.push('\x1b');
+                    if let Some(c) = other {
+                        output.push(c);
+                    }
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+/// Collapse runs of blank lines into a single blank line.
+pub fn collapse_blank_lines(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut prev_blank = false;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if prev_blank {
+                continue;
+            }
+            prev_blank = true;
+        } else {
+            prev_blank = false;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+/// Normalise text for compression: strip ANSI, dedupe global, collapse
+/// consecutive repeats, collapse blank lines.  Returns the cleaned text.
+pub fn normalise_for_compression(text: &str, per_group_limit: usize) -> String {
+    let cleaned = strip_ansi(text);
+    let deduped = dedupe_lines(&cleaned);
+    let (collapsed, _) = collapse_repeats(&deduped, per_group_limit);
+    collapse_blank_lines(&collapsed)
+}
+
 /// Deduplicate consecutive identical lines and return the reduced text plus the
 /// number of duplicates collapsed (for reporting).
 pub fn collapse_repeats(text: &str, per_group_limit: usize) -> (String, usize) {
@@ -236,5 +320,61 @@ mod tests {
         assert!(collapsed.contains("collapsed"));
         assert!(count >= 1);
         assert!(collapsed.contains('c'));
+    }
+
+    #[test]
+    fn strip_ansi_removes_sgr_codes() {
+        let with_ansi = "\x1b[31mred\x1b[0m and \x1b[1mbold\x1b[22m";
+        let clean = strip_ansi(with_ansi);
+        assert_eq!(clean, "red and bold");
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_sequences() {
+        let with_csi = "\x1b[2K\x1b[1Aprogress: 42%\n";
+        let clean = strip_ansi(with_csi);
+        assert_eq!(clean, "progress: 42%\n");
+    }
+
+    #[test]
+    fn strip_ansi_handles_osc_title() {
+        let with_osc = "\x1b]0;my title\x07content";
+        let clean = strip_ansi(with_osc);
+        assert_eq!(clean, "content");
+    }
+
+    #[test]
+    fn strip_ansi_empty_string() {
+        assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn strip_ansi_no_ansi_passthrough() {
+        let text = "hello world\nnormal text\n";
+        assert_eq!(strip_ansi(text), text);
+    }
+
+    #[test]
+    fn collapse_blank_lines_reduces_runs() {
+        let input = "a\n\n\n\nb\n\nc";
+        let output = collapse_blank_lines(input);
+        assert_eq!(output, "a\n\nb\n\nc\n");
+    }
+
+    #[test]
+    fn collapse_blank_lines_single_line() {
+        assert_eq!(collapse_blank_lines("hello\n"), "hello\n");
+    }
+
+    #[test]
+    fn normalise_for_compression_does_not_panic() {
+        let input = "\x1b[32mPASS\x1b[0m test_foo\n\x1b[32mPASS\x1b[0m test_bar\n\n\n\x1b[31mFAIL\x1b[0m test_baz\n\x1b[31mFAIL\x1b[0m test_baz\n";
+        let result = normalise_for_compression(input, 2);
+        // Should strip ANSI, dedupe "FAIL test_baz" to 1, collapse blank lines
+        assert!(result.contains("PASS"));
+        assert!(result.contains("FAIL"));
+        assert!(!result.contains("\x1b"));
+        // "FAIL test_baz" appears only once after dedup + collapse
+        assert_eq!(result.matches("FAIL test_baz").count(), 1);
     }
 }
