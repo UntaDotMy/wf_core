@@ -66,13 +66,29 @@ if [ -x "$script_dir/target/release/wf-core.exe" ]; then
   binary="$script_dir/target/release/wf-core.exe"
 fi
 
+activation_channel="next"
+case "$channel" in
+  stable) activation_channel="stable" ;;
+  insiders) activation_channel="insiders" ;;
+  next|both) activation_channel="next" ;;
+esac
+
+activation_binary="${HOME}/.codeium/windsurf-next/wf-core/wf-core"
+case "$activation_channel" in
+  stable) activation_binary="${HOME}/.codeium/windsurf/wf-core/wf-core" ;;
+  insiders) activation_binary="${HOME}/.codeium/windsurf-insiders/wf-core/wf-core" ;;
+esac
+if [ "$target" = "devin" ]; then
+  activation_binary="${HOME}/.config/devin/wf-core/wf-core"
+fi
+
 "$binary" install --target "$target" --channel "$channel" --source-root "$script_dir"
 "$binary" verify --target "$target" --channel "$channel"
 "$binary" doctor --proxy --target "$target" --channel "$channel" || true
 
 printf '\nwf-core proxy activation:\n'
-printf '  eval "$(%s shell init --channel next)"\n' "$binary"
-printf '  %s doctor --proxy --channel next\n' "$binary"
+printf '  eval "$(%s shell init --channel %s)"\n' "$activation_binary" "$activation_channel"
+printf '  %s doctor --proxy --channel %s\n' "$activation_binary" "$activation_channel"
 
 if [ "$modify_shell_profile" = "true" ]; then
   profile="${HOME}/.profile"
@@ -81,7 +97,7 @@ if [ "$modify_shell_profile" = "true" ]; then
   [ -f "$profile" ] && cp "$profile" "$backup"
   {
     printf '\n# wf-core managed:start\n'
-    printf 'eval "$(%s shell init --channel next)"\n' "$binary"
+    printf 'eval "$(%s shell init --channel %s)"\n' "$activation_binary" "$activation_channel"
     printf '# wf-core managed:end\n'
   } >> "$profile"
   printf 'Updated %s (backup: %s)\n' "$profile" "$backup"

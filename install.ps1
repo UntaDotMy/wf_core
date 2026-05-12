@@ -32,6 +32,23 @@ if (-not (Test-Path $Binary -PathType Leaf)) {
     $Binary = Join-Path $ScriptRoot "target\release\wf-core"
 }
 
+$ActivationChannel = switch ($Channel) {
+    "stable" { "stable" }
+    "insiders" { "insiders" }
+    default { "next" }
+}
+
+$UserProfileRoot = [Environment]::GetFolderPath("UserProfile")
+$ActivationBinary = Join-Path $UserProfileRoot ".codeium\windsurf-next\wf-core\wf-core.exe"
+if ($ActivationChannel -eq "stable") {
+    $ActivationBinary = Join-Path $UserProfileRoot ".codeium\windsurf\wf-core\wf-core.exe"
+} elseif ($ActivationChannel -eq "insiders") {
+    $ActivationBinary = Join-Path $UserProfileRoot ".codeium\windsurf-insiders\wf-core\wf-core.exe"
+}
+if ($Target -eq "devin") {
+    $ActivationBinary = Join-Path $env:APPDATA "devin\wf-core\wf-core.exe"
+}
+
 & $Binary install --target $Target --channel $Channel --source-root $ScriptRoot
 if ($LASTEXITCODE -ne 0) {
     throw "wf-core global install failed with exit code $LASTEXITCODE"
@@ -49,8 +66,8 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "wf-core proxy activation:"
-Write-Host "  & `"$Binary`" shell init --channel next --shell powershell | Invoke-Expression"
-Write-Host "  & `"$Binary`" doctor --proxy --channel next"
+Write-Host "  & `"$ActivationBinary`" shell init --channel $ActivationChannel --shell powershell | Invoke-Expression"
+Write-Host "  & `"$ActivationBinary`" doctor --proxy --channel $ActivationChannel"
 
 if ($ModifyShellProfile) {
     if (-not (Test-Path $PROFILE)) {
@@ -60,7 +77,7 @@ if ($ModifyShellProfile) {
     Copy-Item $PROFILE $Backup -Force
     Add-Content -Path $PROFILE -Value ""
     Add-Content -Path $PROFILE -Value "# wf-core managed:start"
-    Add-Content -Path $PROFILE -Value "& `"$Binary`" shell init --channel next --shell powershell | Invoke-Expression"
+    Add-Content -Path $PROFILE -Value "& `"$ActivationBinary`" shell init --channel $ActivationChannel --shell powershell | Invoke-Expression"
     Add-Content -Path $PROFILE -Value "# wf-core managed:end"
     Write-Host "Updated $PROFILE (backup: $Backup)"
 } else {
