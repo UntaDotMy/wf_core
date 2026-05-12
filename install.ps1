@@ -14,7 +14,7 @@ param(
 
     [string]$Cargo = "",
 
-    [switch]$DoNotModifyShellProfile,
+    [switch]$ModifyShellProfile,
 
     [switch]$FromSource
 )
@@ -102,10 +102,10 @@ function Invoke-WfCoreInstall {
     Write-Host "  & `"$activationBinary`" shell init --channel $activationChannel --shell powershell | Invoke-Expression"
     Write-Host "  & `"$activationBinary`" doctor --proxy --channel $activationChannel"
 
-    if (-not $DoNotModifyShellProfile) {
+    if ($ModifyShellProfile) {
         Update-ShellProfile -ActivationBinary $activationBinary -ActivationChannel $activationChannel
     } else {
-        Write-Host "Shell profile not modified. Omit -DoNotModifyShellProfile to append/replace a managed block."
+        Write-Host "Shell profile not modified. Pass -ModifyShellProfile to append/replace a managed block."
     }
 }
 

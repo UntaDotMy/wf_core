@@ -7,12 +7,12 @@ repository="${WF_CORE_REPOSITORY:-UntaDotMy/wf_core}"
 version="${WF_CORE_VERSION:-latest}"
 channel="${WF_CORE_CHANNEL:-both}"
 target="${WF_CORE_TARGET:-all}"
-modify_shell_profile="true"
+modify_shell_profile="false"
 from_source="false"
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--target windsurf|devin|all] [--channel stable|next|insiders|both] [--version latest|vX|bootstrap-X] [--repository owner/repo] [--no-modify-shell-profile] [--from-source]
+Usage: install.sh [--target windsurf|devin|all] [--channel stable|next|insiders|both] [--version latest|vX|bootstrap-X] [--repository owner/repo] [--modify-shell-profile] [--from-source]
 
 Default mode downloads the matching wf-core release archive and installs it.
 Use --from-source inside a cloned repo to build with Cargo instead.
@@ -29,8 +29,7 @@ while [ "$#" -gt 0 ]; do
     --version=*) version="${1#*=}"; shift ;;
     --repository) repository="${2:-}"; shift 2 ;;
     --repository=*) repository="${1#*=}"; shift ;;
-    --no-modify-shell-profile) modify_shell_profile="false"; shift ;;
-    --modify-shell-profile) shift ;; # backwards compat; now default
+    --modify-shell-profile) modify_shell_profile="true"; shift ;;
     --from-source) from_source="true"; shift ;;
     --scope|--project-root)
       printf 'wf-core install is global-only; %s is not supported.\n' "$1" >&2
@@ -224,7 +223,7 @@ run_install() {
   if [ "$modify_shell_profile" = "true" ]; then
     update_shell_profile "$activation_binary" "$selected_channel"
   else
-    printf 'Shell profile not modified. Omit --no-modify-shell-profile to modify it.\n'
+    printf 'Shell profile not modified. Pass --modify-shell-profile to append/replace a managed block.\n'
   fi
 }
 
