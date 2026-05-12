@@ -95,21 +95,12 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
     let mut updated = 0usize;
     let mut removed = 0usize;
     let mut vulnerabilities: Vec<String> = Vec::new();
+    let mut has_summary_line = false;
 
     for line in text.lines() {
         let trimmed = line.trim();
-        // Individual package lines from npm/pnpm/yarn
-        if trimmed.starts_with("+ ") {
-            added += 1;
-        }
-        if trimmed.starts_with("- ") {
-            removed += 1;
-        }
-        if trimmed.starts_with("~ ") {
-            updated += 1;
-        }
 
-        // npm summary lines
+        // npm summary lines are authoritative — count from those when present.
         if let Some(rest) = trimmed.strip_prefix("added ") {
             if rest.contains("package") {
                 let count: usize = rest
@@ -118,6 +109,8 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
                     .and_then(|w| w.parse().ok())
                     .unwrap_or(0);
                 added += count;
+                has_summary_line = true;
+                continue;
             }
         }
         if let Some(rest) = trimmed.strip_prefix("removed ") {
@@ -128,6 +121,8 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
                     .and_then(|w| w.parse().ok())
                     .unwrap_or(0);
                 removed += count;
+                has_summary_line = true;
+                continue;
             }
         }
         if trimmed.starts_with("changed ") && trimmed.contains("package") {
@@ -137,6 +132,8 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
                 .and_then(|w| w.parse().ok())
                 .unwrap_or(0);
             updated += count;
+            has_summary_line = true;
+            continue;
         }
 
         // npm audit
@@ -159,6 +156,23 @@ fn extract_npm_summary(text: &str, build: &mut AdapterBuild) {
         // Also capture "X packages are looking for funding"
         if trimmed.contains("funding") {
             build.push_line(&format!("  funding: {trimmed}"));
+        }
+    }
+
+    // Fallback: count individual +/-/~ lines only when no summary line was found
+    // to avoid double-counting (npm emits both individual and summary lines).
+    if !has_summary_line {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("+ ") {
+                added += 1;
+            }
+            if trimmed.starts_with("- ") {
+                removed += 1;
+            }
+            if trimmed.starts_with("~ ") {
+                updated += 1;
+            }
         }
     }
 

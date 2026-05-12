@@ -907,41 +907,26 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                 // state entirely, so both cheap and expensive models see the same
                 // result without needing to recover from a block message.
                 let exe = env::current_exe()?;
-                let needs_shell = requires_shell(&command);
-                let output_result = if needs_shell {
-                    std::process::Command::new(&exe)
-                        .args(["run", "--shell", "--", &command])
-                        .stdin(std::process::Stdio::null())
-                        .output()
-                } else {
-                    let mut run_args: Vec<String> = vec!["run".to_string(), "--".to_string()];
-                    run_args.extend(command.split_whitespace().map(String::from));
-                    std::process::Command::new(&exe)
-                        .args(&run_args)
-                        .stdin(std::process::Stdio::null())
-                        .output()
-                };
+                let output_result = std::process::Command::new(&exe)
+                    .args(["run", "--shell", "--", &command])
+                    .stdin(std::process::Stdio::null())
+                    .output();
                 match output_result {
                     Ok(output) => {
                         io::stdout().write_all(&output.stdout)?;
                         io::stderr().write_all(&output.stderr)?;
                         let _ = io::stdout().flush();
                         let _ = io::stderr().flush();
-                        std::process::exit(output.status.code().unwrap_or(0));
+                        std::process::exit(output.status.code().unwrap_or(1));
                     }
                     Err(e) => {
                         // Fallback: emit the block message so the framework still
                         // surfaces a rerun suggestion.
                         let wrapper = current_wrapper_command()?;
-                        let rerun = if needs_shell {
-                            format!("{wrapper} run --shell -- {}", quote_arg(&command))
-                        } else {
-                            format!("{wrapper} run -- {command}")
-                        };
                         eprintln!("[wf-core] auto-proxy failed ({e}); falling back to block");
                         println!(
                             "{{\"decision\":\"block\",\"reason\":{}}}",
-                            json_string(&format!("Rerun that as: {rerun}"))
+                            json_string(&format!("Rerun that as: {wrapper} run --shell -- {}", quote_arg(&command)))
                         );
                     }
                 }
