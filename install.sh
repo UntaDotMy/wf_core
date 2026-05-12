@@ -5,6 +5,7 @@ set -euo pipefail
 
 channel="both"
 target="all"
+modify_shell_profile="false"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -24,6 +25,10 @@ while [ "$#" -gt 0 ]; do
       target="${1#*=}"
       shift
       ;;
+    --modify-shell-profile)
+      modify_shell_profile="true"
+      shift
+      ;;
     --scope|--project-root)
       printf 'wf-core install is global-only; %s is not supported.\n' "$1" >&2
       exit 1
@@ -33,7 +38,7 @@ while [ "$#" -gt 0 ]; do
       exit 1
       ;;
     -h|--help)
-      printf 'Usage: ./install.sh [--target windsurf|devin|all] [--channel stable|next|insiders|both]\n'
+      printf 'Usage: ./install.sh [--target windsurf|devin|all] [--channel stable|next|insiders|both] [--modify-shell-profile]\n'
       exit 0
       ;;
     *)
@@ -63,3 +68,23 @@ fi
 
 "$binary" install --target "$target" --channel "$channel" --source-root "$script_dir"
 "$binary" verify --target "$target" --channel "$channel"
+"$binary" doctor --proxy --target "$target" --channel "$channel" || true
+
+printf '\nwf-core proxy activation:\n'
+printf '  eval "$(%s shell init --channel next)"\n' "$binary"
+printf '  %s doctor --proxy --channel next\n' "$binary"
+
+if [ "$modify_shell_profile" = "true" ]; then
+  profile="${HOME}/.profile"
+  [ -n "${SHELL:-}" ] && [ "$(basename "$SHELL")" = "zsh" ] && profile="${HOME}/.zshrc"
+  backup="${profile}.wf-core.bak.$(date +%Y%m%d%H%M%S)"
+  [ -f "$profile" ] && cp "$profile" "$backup"
+  {
+    printf '\n# wf-core managed:start\n'
+    printf 'eval "$(%s shell init --channel next)"\n' "$binary"
+    printf '# wf-core managed:end\n'
+  } >> "$profile"
+  printf 'Updated %s (backup: %s)\n' "$profile" "$backup"
+else
+  printf 'Shell profile not modified. Pass --modify-shell-profile to append a managed block.\n'
+fi

@@ -84,12 +84,18 @@ pub fn shim_dir(channel: &str, target: ProxyTarget) -> Result<PathBuf, AppError>
 }
 
 pub fn install_shims(options: &ShimInstallOptions) -> Result<Vec<PathBuf>, AppError> {
+    install_shims_with_binary(options, &env::current_exe()?)
+}
+
+pub fn install_shims_with_binary(
+    options: &ShimInstallOptions,
+    binary: &Path,
+) -> Result<Vec<PathBuf>, AppError> {
     let dir = shim_dir(&options.channel, options.target)?;
     fs::create_dir_all(&dir)?;
-    let binary = env::current_exe()?;
     let mut written = Vec::new();
     for name in DEFAULT_SHIM_NAMES {
-        written.extend(write_shim_files(&dir, &binary, name)?);
+        written.extend(write_shim_files(&dir, binary, name)?);
     }
     Ok(written)
 }

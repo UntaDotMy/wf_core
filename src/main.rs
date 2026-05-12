@@ -1845,6 +1845,13 @@ fn install_global_channel(
     let current_exe = env::current_exe()?;
     let installed_binary = installed_binary_path(channel)?;
     fs::copy(&current_exe, &installed_binary)?;
+    let shim_files = proxy::install_shims_with_binary(
+        &proxy::ShimInstallOptions {
+            channel: channel.to_string(),
+            target: proxy::ProxyTarget::Windsurf,
+        },
+        &installed_binary,
+    )?;
     let agents_source = source_root.join("AGENTS.md");
     if agents_source.exists() {
         fs::copy(&agents_source, cli_dir.join("AGENTS.md"))?;
@@ -1858,8 +1865,14 @@ fn install_global_channel(
     write_manifest(&home, &manifest)?;
 
     summary.messages.push(format!(
-        "{channel}: installed global skills, workflows, global rules, and Rust binary at {}",
+        "{channel}: installed global skills, workflows, global rules, Rust binary at {}, and {} shim files at {}",
         display_path(&installed_binary)
+        ,
+        shim_files.len(),
+        display_path(&proxy::shim_dir(channel, proxy::ProxyTarget::Windsurf)?)
+    ));
+    summary.messages.push(format!(
+        "{channel}: activate proxy with eval \"$(wf-core shell init --channel {channel})\"; verify with wf-core doctor --proxy --channel {channel}"
     ));
     Ok(())
 }
@@ -1886,6 +1899,13 @@ fn install_devin_global(source_root: &Path, summary: &mut InstallSummary) -> Res
     let current_exe = env::current_exe()?;
     let installed_binary = devin_binary_path()?;
     fs::copy(&current_exe, &installed_binary)?;
+    let shim_files = proxy::install_shims_with_binary(
+        &proxy::ShimInstallOptions {
+            channel: "next".to_string(),
+            target: proxy::ProxyTarget::Devin,
+        },
+        &installed_binary,
+    )?;
     let agents_source = source_root.join("AGENTS.md");
     if agents_source.exists() {
         fs::copy(&agents_source, cli_dir.join("AGENTS.md"))?;
@@ -1898,9 +1918,12 @@ fn install_devin_global(source_root: &Path, summary: &mut InstallSummary) -> Res
     remove_stale_from_manifest(&home, &manifest)?;
     write_manifest(&home, &manifest)?;
     summary.messages.push(format!(
-        "devin: installed global skills, hooks, config import, and Rust binary at {}",
-        display_path(&installed_binary)
+        "devin: installed global skills, hooks, config import, Rust binary at {}, and {} shim files at {}",
+        display_path(&installed_binary),
+        shim_files.len(),
+        display_path(&proxy::shim_dir("next", proxy::ProxyTarget::Devin)?)
     ));
+    summary.messages.push("devin: activate proxy with wf-core shell init --target devin; verify with wf-core doctor --proxy --target devin".to_string());
     Ok(())
 }
 

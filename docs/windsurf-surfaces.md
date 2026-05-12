@@ -40,6 +40,9 @@ AGENTS.md
 ~/.codeium/<channel>/windsurf/workflows/wf-core-*.md
 ~/.codeium/<channel>/wf-core/AGENTS.md
 ~/.codeium/<channel>/wf-core/wf-core(.exe)
+~/.codeium/<channel>/wf-core/shims/
+~/.codeium/<channel>/wf-core/raw-output/
+~/.codeium/<channel>/wf-core/gain/events.jsonl
 ```
 
 The installer preserves existing global rules by replacing only the wf-core
@@ -47,7 +50,17 @@ managed block. Managed workflows use the `wf-core-` prefix so existing user
 workflows such as `review.md` are not overwritten.
 
 Restart Windsurf after global install so newly copied global skills and
-workflows are discovered.
+workflows are discovered. Then activate the command proxy in each shell:
+
+```bash
+wf-core shim install --channel next
+eval "$(wf-core shell init --channel next)"
+wf-core doctor --proxy --channel next
+```
+
+Rules and workflows do not save tokens by themselves. Real automatic savings
+require the shim directory to be ahead of the real tools on `PATH`; otherwise use
+the explicit `wf-core run -- <command>` fallback.
 
 For Devin for Terminal, see `docs/devin-local.md`; the same skill pack is also
 installed into Devin's native global config home.

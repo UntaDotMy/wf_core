@@ -8,7 +8,9 @@ param(
     [ValidateSet("windsurf", "devin", "all")]
     [string]$Target = "all",
 
-    [string]$Cargo = ""
+    [string]$Cargo = "",
+
+    [switch]$ModifyShellProfile
 )
 
 Set-StrictMode -Version 2.0
@@ -38,4 +40,29 @@ if ($LASTEXITCODE -ne 0) {
 & $Binary verify --target $Target --channel $Channel
 if ($LASTEXITCODE -ne 0) {
     throw "wf-core verify failed with exit code $LASTEXITCODE"
+}
+
+& $Binary doctor --proxy --target $Target --channel $Channel
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "wf-core proxy doctor reported warnings. Activate shell proxy with the command printed below."
+}
+
+Write-Host ""
+Write-Host "wf-core proxy activation:"
+Write-Host "  & `"$Binary`" shell init --channel next --shell powershell | Invoke-Expression"
+Write-Host "  & `"$Binary`" doctor --proxy --channel next"
+
+if ($ModifyShellProfile) {
+    if (-not (Test-Path $PROFILE)) {
+        New-Item -ItemType File -Path $PROFILE -Force | Out-Null
+    }
+    $Backup = "$PROFILE.wf-core.bak.$(Get-Date -Format yyyyMMddHHmmss)"
+    Copy-Item $PROFILE $Backup -Force
+    Add-Content -Path $PROFILE -Value ""
+    Add-Content -Path $PROFILE -Value "# wf-core managed:start"
+    Add-Content -Path $PROFILE -Value "& `"$Binary`" shell init --channel next --shell powershell | Invoke-Expression"
+    Add-Content -Path $PROFILE -Value "# wf-core managed:end"
+    Write-Host "Updated $PROFILE (backup: $Backup)"
+} else {
+    Write-Host "Shell profile not modified. Pass -ModifyShellProfile to append a managed block."
 }

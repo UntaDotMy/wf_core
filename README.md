@@ -3,7 +3,7 @@
 Rust-native global installer for Windsurf, Windsurf Next, and Devin for
 Terminal rules, skills, workflows, AGENTS guidance, hook-equivalent terminal
 discipline, memory/system-map surfaces, and token-saving command output
-compaction.
+proxying.
 
 Windsurf stable, Windsurf Next, and Devin for Terminal can read overlapping
 Windsurf surfaces, but they also have different global folders. `wf_core`
@@ -11,8 +11,9 @@ installs the same managed surface into all supported homes so behavior stays
 consistent across local agents.
 
 Important: "save token" means save context/output tokens. `wf_core` never
-collects, stores, prints, or backs up user auth tokens, API keys, cookies, or
-session secrets.
+collects, uploads, or backs up user auth tokens, API keys, cookies, or session
+secrets. Raw command output stays local for recovery and may contain whatever
+the command printed.
 
 ## Global-Only Install
 
@@ -32,6 +33,7 @@ Install writes only to global agent homes, not to an arbitrary user workspace:
 | Workflows | `~/.codeium/<channel>/windsurf/workflows/wf-core-*.md` |
 | AGENTS guidance copy | `~/.codeium/<channel>/wf-core/AGENTS.md` |
 | Rust binary | `~/.codeium/<channel>/wf-core/wf-core(.exe)` |
+| Native command shims | `~/.codeium/<channel>/wf-core/shims/` |
 | Install manifest | `~/.codeium/<channel>/wf-core/manifest.tsv` |
 | Raw output and analytics | `~/.codeium/<channel>/wf-core/raw-output/`, `gain/events.jsonl` |
 
@@ -91,24 +93,54 @@ Successful install shows:
 If `wf-core` is not on `PATH`, use the installed binary path shown by the
 installer.
 
-## Token-Saving Command Routing
+## Native Token-Saving Proxy
 
-Use the Rust wrapper before noisy output is produced:
+Real savings happen only when `wf-core` sits between the agent and the noisy
+command before raw output reaches model context. Rules and workflows guide the
+agent; the native proxy/shim does the interception.
+
+Automatic shim mode:
+
+```bash
+wf-core shim install --channel next
+eval "$(wf-core shell init --channel next)"
+wf-core doctor --proxy --channel next
+```
+
+After activation, common noisy commands are intercepted automatically:
+
+```bash
+cargo test --workspace
+pytest -q
+git diff
+rg "CompactResult" .
+docker logs api
+```
+
+Explicit fallback works everywhere:
 
 ```bash
 wf-core run -- cargo test --workspace
-wf-core run -- npm test
-wf-core run -- git status --short --branch
+wf-core run -- pytest -q
+wf-core run -- git diff
+wf-core run -- rg "foo" .
 wf-core run --shell -- "npm test 2>&1 | tee test.log"
 ```
 
-When unsure:
+Recovery and analytics:
 
 ```bash
-wf-core rewrite "cargo test --workspace"
-wf-core hook instructions
+wf-core raw <raw_id>
+wf-core raw list --limit 20
+wf-core replay <raw_id>
 wf-core gain --channel next
+wf-core discover --channel next
+wf-core rewrite "cargo test --workspace"
 ```
+
+Compact output always includes `raw: wf-core raw <raw_id>` when output is
+compacted, plus estimated before/after token savings. Estimated tokens use a
+local approximation; do not claim savings that are not measured in gain events.
 
 Installed global binaries:
 
@@ -167,6 +199,10 @@ wf-core hook list --channel both
 wf-core memory status --repo-root .
 wf-core memory system-map refresh --repo-root .
 wf-core memory system-map verify --repo-root .
+wf-core shim install --channel next
+wf-core shell init --channel next
+wf-core doctor --proxy --channel next
+wf-core discover --channel next
 wf-core hook instructions
 wf-core rewrite "pytest -q"
 wf-core run -- pytest -q
