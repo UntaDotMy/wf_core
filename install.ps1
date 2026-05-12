@@ -86,6 +86,9 @@ if ($ModifyShellProfile) {
 # wf-core managed:end
 "@
     $Content = Get-Content -Path $PROFILE -Raw
+    if ($null -eq $Content) {
+        $Content = ""
+    }
     $ManagedBlockRegex = [regex]"(?s)# wf-core managed:start.*?# wf-core managed:end"
     if ($ManagedBlockRegex.IsMatch($Content)) {
         $Replacement = [System.Text.RegularExpressions.MatchEvaluator]{ param($Match) $ManagedBlock }
