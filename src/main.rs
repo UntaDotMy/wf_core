@@ -172,6 +172,7 @@ fn run(arguments: Vec<String>) -> Result<i32, AppError> {
         "raw" => command_raw(&arguments[1..]),
         "replay" => command_replay(&arguments[1..]),
         "gain" => command_gain(&arguments[1..]),
+        "discover" => command_discover(&arguments[1..]),
         "instructions" => {
             print_instructions();
             Ok(0)
@@ -211,6 +212,7 @@ Usage:
   wf-core replay <raw_id> [--allow-risky]
   wf-core gain [--channel next] [--target windsurf|devin] [--since 7d|today]
               [--adapter NAME] [--json]
+  wf-core discover [--channel next] [--target windsurf|devin] [--since 7d] [--min-tokens N] [--json]
   wf-core instructions
   wf-core uninstall --yes [--channel stable|next|insiders|both]
 
@@ -388,11 +390,43 @@ fn print_devin_status() -> Result<(), AppError> {
 
 fn command_doctor(arguments: &[String]) -> Result<i32, AppError> {
     if has_flag(arguments, "--proxy") {
-        let shim_code = command_shim_doctor(arguments)?;
         let registry = proxy::default_registry();
+        if has_flag(arguments, "--json") {
+            let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+            let target = proxy::ProxyTarget::from_str(
+                &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
+            );
+            let (ok, warn) = proxy::shim_doctor(&channel, target)?;
+            let ok_json = ok
+                .iter()
+                .map(|line| json_string(line))
+                .collect::<Vec<_>>()
+                .join(",");
+            let warn_json = warn
+                .iter()
+                .map(|line| json_string(line))
+                .collect::<Vec<_>>()
+                .join(",");
+            let adapters_json = registry
+                .names()
+                .iter()
+                .map(|name| json_string(name))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "{{\n  \"proxyReady\": {},\n  \"channel\": {},\n  \"target\": {},\n  \"adapters\": [{}],\n  \"ok\": [{}],\n  \"warnings\": [{}]\n}}",
+                warn.is_empty(),
+                json_string(&channel),
+                json_string(target.as_str()),
+                adapters_json,
+                ok_json,
+                warn_json
+            );
+            return Ok(if warn.is_empty() { 0 } else { 1 });
+        }
+        let shim_code = command_shim_doctor(arguments)?;
         println!("[ok] adapters: {}", registry.names().join(", "));
-        let rewrite_args = vec!["--json".to_string(), "cargo test".to_string()];
-        let _ = command_rewrite(&rewrite_args);
+        println!("[ok] rewrite: cargo test -> wf-core run -- cargo test");
         return Ok(shim_code);
     }
     let status_code = command_status(arguments)?;
@@ -1594,6 +1628,166 @@ fn command_gain(arguments: &[String]) -> Result<i32, AppError> {
         }
     }
     Ok(0)
+}
+
+fn command_discover(arguments: &[String]) -> Result<i32, AppError> {
+    let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = proxy::ProxyTarget::from_str(
+        &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
+    );
+    let as_json = has_flag(arguments, "--json");
+    let min_tokens = flag_value(arguments, "--min-tokens")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10_000);
+    let since_filter = flag_value(arguments, "--since")
+        .unwrap_or_else(|| "7d".to_string())
+        .as_str()
+        .to_string();
+    let since_ms = proxy::parse_duration_ms(&since_filter).unwrap_or(7 * 24 * 60 * 60 * 1000);
+    let cutoff = proxy::now_unix_ms().saturating_sub(since_ms);
+    let events_path = proxy::gain_events_path(&channel, target)?;
+    let events: Vec<proxy::GainEventV2> = proxy::read_events(&events_path)?
+        .into_iter()
+        .filter(|event| event.timestamp_unix_ms >= cutoff)
+        .collect();
+
+    #[derive(Clone)]
+    struct Opportunity {
+        command: String,
+        adapter: String,
+        tokens: usize,
+        savings_pct: f64,
+        reason: String,
+        recommendation: String,
+        raw_id: String,
+    }
+
+    let mut opportunities = Vec::<Opportunity>::new();
+    for event in &events {
+        let raw_tokens = event.estimated_tokens_before;
+        if raw_tokens < min_tokens {
+            continue;
+        }
+        let reason = if event.adapter_name == "generic" {
+            "generic adapter handled large output"
+        } else if !event.compacted {
+            "large command was passthrough"
+        } else if event.savings_pct < 50.0 {
+            "low savings percentage"
+        } else if event.invoked_as_shim.is_none() {
+            "not intercepted by shim"
+        } else {
+            continue;
+        };
+        let recommendation = discover_recommendation(event);
+        opportunities.push(Opportunity {
+            command: event.command.clone(),
+            adapter: event.adapter_name.clone(),
+            tokens: raw_tokens,
+            savings_pct: event.savings_pct,
+            reason: reason.to_string(),
+            recommendation,
+            raw_id: event.raw_id.clone(),
+        });
+    }
+    opportunities.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+
+    let (shim_ok, shim_warn) = proxy::shim_doctor(&channel, target)?;
+    if as_json {
+        let mut opp_json = String::new();
+        for (index, item) in opportunities.iter().enumerate() {
+            if index > 0 {
+                opp_json.push(',');
+            }
+            opp_json.push_str(&format!(
+                "{{\"command\":{},\"adapter\":{},\"estimatedRawTokens\":{},\"savingsPct\":{:.4},\"reason\":{},\"recommendation\":{},\"rawId\":{}}}",
+                json_string(&item.command),
+                json_string(&item.adapter),
+                item.tokens,
+                item.savings_pct,
+                json_string(&item.reason),
+                json_string(&item.recommendation),
+                json_string(&item.raw_id)
+            ));
+        }
+        let warnings = shim_warn
+            .iter()
+            .map(|line| json_string(line))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{{\n  \"channel\": {},\n  \"target\": {},\n  \"since\": {},\n  \"minTokens\": {},\n  \"events\": {},\n  \"missedOpportunities\": [{}],\n  \"setupWarnings\": [{}]\n}}",
+            json_string(&channel),
+            json_string(target.as_str()),
+            json_string(&since_filter),
+            min_tokens,
+            events.len(),
+            opp_json,
+            warnings
+        );
+        return Ok(0);
+    }
+
+    println!("wf-core discover");
+    println!("channel: {channel}");
+    println!("target: {}", target.as_str());
+    println!("events scanned: {}", events.len());
+    println!("min tokens: {min_tokens}");
+    println!();
+    if opportunities.is_empty() {
+        println!("missed opportunities: none above threshold");
+    } else {
+        println!("missed opportunities:");
+        for (index, item) in opportunities.iter().take(10).enumerate() {
+            println!("{}. {}", index + 1, item.command);
+            println!("   estimated raw tokens: {}", item.tokens);
+            println!("   current adapter: {}", item.adapter);
+            println!("   reason: {}", item.reason);
+            println!("   recommendation: {}", item.recommendation);
+            if !item.raw_id.is_empty() {
+                println!("   raw: wf-core raw {}", item.raw_id);
+            }
+        }
+    }
+    println!();
+    println!("setup:");
+    if shim_warn.is_empty() {
+        for line in shim_ok {
+            println!("- {line}");
+        }
+    } else {
+        for line in shim_warn {
+            println!("- {line}");
+        }
+    }
+    Ok(0)
+}
+
+fn discover_recommendation(event: &proxy::GainEventV2) -> String {
+    let command = event.command.to_ascii_lowercase();
+    if event.invoked_as_shim.is_none() {
+        return "enable native shims or run through wf-core explicitly".to_string();
+    }
+    if event.adapter_name == "generic" {
+        if command.contains("docker logs")
+            || command.contains("kubectl logs")
+            || command.contains("journalctl")
+        {
+            return "improve logs adapter coverage for this command shape".to_string();
+        }
+        if command.contains("terraform") || command.contains("helm") {
+            return "add or improve infra/logs reducer coverage".to_string();
+        }
+        return "add a semantic adapter or matcher for this noisy command".to_string();
+    }
+    if !event.compacted {
+        return "route this command through semantic compaction when output exceeds budget"
+            .to_string();
+    }
+    if event.savings_pct < 50.0 {
+        return "tighten reducer budget or remove low-value repeated lines".to_string();
+    }
+    "no action".to_string()
 }
 
 fn command_uninstall(arguments: &[String]) -> Result<i32, AppError> {
@@ -4345,6 +4539,17 @@ mod tests {
         .collect();
         let positional = collect_positional(&args, REPLAY_VALUE_FLAGS, REPLAY_BOOL_FLAGS);
         assert_eq!(positional, vec!["20260512-003044-abc12345".to_string()]);
+    }
+
+    #[test]
+    fn discover_recommendation_flags_generic_large_logs() {
+        let event = proxy::GainEventV2 {
+            command: "docker logs api".to_string(),
+            adapter_name: "generic".to_string(),
+            invoked_as_shim: Some("docker".to_string()),
+            ..proxy::GainEventV2::default()
+        };
+        assert!(discover_recommendation(&event).contains("logs adapter"));
     }
 
     #[test]
