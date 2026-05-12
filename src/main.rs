@@ -3945,7 +3945,7 @@ fn devin_pre_tool_use_entry_json(binary: &Path) -> String {
         quote_arg(&display_path(binary))
     );
     format!(
-        "{{\n        \"matcher\": \"exec\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {}, \"timeout\": 5 }}]\n      }}",
+        "{{\n        \"matcher\": \"exec\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {}, \"timeout\": 300 }}]\n      }}",
         json_string(&command)
     )
 }
