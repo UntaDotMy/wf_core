@@ -201,8 +201,7 @@ pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunRepo
         final_result.summary.len() + final_result.stdout.len() + final_result.stderr.len();
     if pre_len > 0 && post_len < pre_len {
         let ratio = post_len as f64 / pre_len as f64;
-        let adjusted_after =
-            (final_result.estimated_tokens_after as f64 * ratio).round() as usize;
+        let adjusted_after = (final_result.estimated_tokens_after as f64 * ratio).round() as usize;
         final_result.estimated_tokens_after = adjusted_after;
         final_result.estimated_tokens_saved =
             final_result.estimated_tokens_before as isize - adjusted_after as isize;

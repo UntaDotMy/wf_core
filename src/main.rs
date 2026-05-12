@@ -926,7 +926,10 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                         eprintln!("[wf-core] auto-proxy failed ({e}); falling back to block");
                         println!(
                             "{{\"decision\":\"block\",\"reason\":{}}}",
-                            json_string(&format!("Rerun that as: {wrapper} run --shell -- {}", quote_arg(&command)))
+                            json_string(&format!(
+                                "Rerun that as: {wrapper} run --shell -- {}",
+                                quote_arg(&command)
+                            ))
                         );
                     }
                 }
