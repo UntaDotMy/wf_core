@@ -134,10 +134,10 @@ pub fn strip_ansi(text: &str) -> String {
                 Some(c) if c.is_ascii_alphabetic() => {
                     // consume single char escape like \x1bM (RI)
                 }
-                _ => {
+                other => {
                     // Unknown escape — emit raw if incomplete.
                     output.push('\x1b');
-                    if let Some(c) = chars.next() {
+                    if let Some(c) = other {
                         output.push(c);
                     }
                 }

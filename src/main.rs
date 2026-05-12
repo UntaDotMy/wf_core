@@ -914,8 +914,10 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                         .stdin(std::process::Stdio::null())
                         .output()
                 } else {
+                    let mut run_args: Vec<String> = vec!["run".to_string(), "--".to_string()];
+                    run_args.extend(command.split_whitespace().map(String::from));
                     std::process::Command::new(&exe)
-                        .args(["run", "--", &command])
+                        .args(&run_args)
                         .stdin(std::process::Stdio::null())
                         .output()
                 };
@@ -923,6 +925,8 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                     Ok(output) => {
                         io::stdout().write_all(&output.stdout)?;
                         io::stderr().write_all(&output.stderr)?;
+                        let _ = io::stdout().flush();
+                        let _ = io::stderr().flush();
                         std::process::exit(output.status.code().unwrap_or(0));
                     }
                     Err(e) => {
