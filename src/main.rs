@@ -56,7 +56,6 @@ const NOISY_ROOT_COMMANDS: &[&str] = &[
     "cpack",
     "ctest",
     "curl",
-    "wget",
     "docker",
     "docker-compose",
     "dotnet",
@@ -85,6 +84,7 @@ const NOISY_ROOT_COMMANDS: &[&str] = &[
     "terraform",
     "tsc",
     "vitest",
+    "wget",
     "yarn",
 ];
 
@@ -3952,7 +3952,7 @@ fn devin_pre_tool_use_entry_json(binary: &Path) -> String {
         quote_arg(&display_path(binary))
     );
     format!(
-        "{{\n        \"matcher\": \"exec\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {}, \"timeout\": 5 }}]\n      }}",
+        "{{\n        \"matcher\": \"exec\",\n        \"hooks\": [{{ \"type\": \"command\", \"command\": {}, \"timeout\": 300 }}]\n      }}",
         json_string(&command)
     )
 }
