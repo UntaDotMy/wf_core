@@ -1,0 +1,318 @@
+use std::env;
+use std::path::PathBuf;
+
+use crate::AppError;
+
+use super::adapter::{CompactResult, OutputBudget, RawRun, RunMeta};
+use super::command_ast::{build_ast, CommandAst};
+use super::event_log;
+use super::raw_store::{
+    find_raw_dir, new_raw_id, now_unix_ms, raw_store_root, save_run, write_compact,
+    write_meta_json, ProxyTarget, RawRunSummary,
+};
+use super::registry::default_registry;
+use super::safety::{is_interactive_command, redact_secrets};
+use super::shell::execute_command;
+use super::token_meter::TokenMeter;
+
+const PROXY_RECURSION_ENV: &str = "WF_CORE_PROXY_ACTIVE";
+
+/// User-facing options for `wf-core run`.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub channel: String,
+    pub target: ProxyTarget,
+    pub shell_mode: bool,
+    pub full: bool,
+    pub no_compact: bool,
+    pub no_raw: bool,
+    pub no_redact: bool,
+    pub as_json: bool,
+    pub list_adapters: bool,
+    pub forced_adapter: Option<String>,
+    pub budget: OutputBudget,
+    pub invoked_as_shim: Option<String>,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            channel: "next".to_string(),
+            target: ProxyTarget::Windsurf,
+            shell_mode: false,
+            full: false,
+            no_compact: false,
+            no_raw: false,
+            no_redact: false,
+            as_json: false,
+            list_adapters: false,
+            forced_adapter: None,
+            budget: OutputBudget::default(),
+            invoked_as_shim: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RunReport {
+    pub exit_code: i32,
+    pub ast: CommandAst,
+    pub result: CompactResult,
+}
+
+/// Run a command end-to-end through the proxy pipeline.
+pub fn run_proxy(command_args: &[String], options: RunOptions) -> Result<RunReport, AppError> {
+    if command_args.is_empty() {
+        return Err(AppError::new("no command provided"));
+    }
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let ast = build_ast(
+        command_args,
+        cwd.clone(),
+        options.shell_mode,
+        options.invoked_as_shim.clone(),
+    );
+    let started_at_unix_ms = now_unix_ms();
+
+    let registry = default_registry();
+    let output = execute_command(command_args, options.shell_mode)?;
+    let duration_ms = now_unix_ms().saturating_sub(started_at_unix_ms);
+    let exit_code = output.status.code().unwrap_or(1);
+    let run = RawRun {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code,
+        duration_ms,
+    };
+
+    let raw_id = new_raw_id(&ast.original_command, started_at_unix_ms);
+    let mut adapter_name_for_meta = "passthrough".to_string();
+
+    // Decide where to write raw output.
+    let raw_root = raw_store_root(&options.channel, options.target)?;
+    let (raw_path, compact_path, dir) = if options.no_raw {
+        let stub = raw_root.join("disabled").join(&raw_id);
+        (stub.join("stdout.log"), stub.join("compact.txt"), stub)
+    } else {
+        save_run(
+            &raw_root,
+            &raw_id,
+            &ast.original_command,
+            command_args,
+            options.shell_mode,
+            &run,
+        )?
+    };
+    let meta_path = dir.join("meta.json");
+
+    let tokens_before =
+        TokenMeter::estimate_bytes(&run.stdout) + TokenMeter::estimate_bytes(&run.stderr);
+
+    // Resolve adapter or passthrough.
+    let result = if options.full || options.no_compact {
+        let mut result = CompactResult::passthrough(
+            "full",
+            &raw_id,
+            &raw_path,
+            &compact_path,
+            &run,
+            tokens_before,
+        );
+        result.compacted = false;
+        result
+    } else if is_interactive_command(&ast.program, &ast.args) {
+        let mut result = CompactResult::passthrough(
+            "interactive",
+            &raw_id,
+            &raw_path,
+            &compact_path,
+            &run,
+            tokens_before,
+        );
+        result
+            .warnings
+            .push("interactive command detected; not compacting".to_string());
+        result.compacted = false;
+        result
+    } else {
+        let adapter = match &options.forced_adapter {
+            Some(name) => registry
+                .by_name(name)
+                .ok_or_else(|| AppError::new(format!("unknown adapter: {name}")))?,
+            None => registry.pick(&ast),
+        };
+        let meta = RunMeta {
+            raw_id: raw_id.clone(),
+            command: ast.original_command.clone(),
+            cwd: cwd.clone(),
+            started_at_unix_ms,
+            duration_ms,
+            exit_code,
+            adapter_name: adapter.name().to_string(),
+            raw_path: raw_path.clone(),
+            compact_path: compact_path.clone(),
+            channel: options.channel.clone(),
+            target_agent: options.target.as_str().to_string(),
+            invoked_as_shim: options.invoked_as_shim.clone(),
+            wf_core_version: crate::VERSION.to_string(),
+        };
+        adapter_name_for_meta = adapter.name().to_string();
+        adapter.compact(&ast, &run, &meta, options.budget)
+    };
+
+    // Optionally redact possible secrets in the compact text. Raw output is
+    // never altered: it is local recovery data.
+    let mut final_result = result;
+    if !options.no_redact {
+        let (redacted_stdout, _) = redact_secrets(&final_result.stdout);
+        let (redacted_stderr, _) = redact_secrets(&final_result.stderr);
+        final_result.stdout = redacted_stdout;
+        final_result.stderr = redacted_stderr;
+    }
+
+    if !options.no_raw {
+        let mut content = String::new();
+        if !final_result.summary.is_empty() {
+            content.push_str(&final_result.summary);
+            content.push('\n');
+        }
+        if !final_result.stdout.is_empty() {
+            content.push_str(&final_result.stdout);
+            if !final_result.stdout.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        if !final_result.stderr.is_empty() {
+            content.push_str("[stderr]\n");
+            content.push_str(&final_result.stderr);
+        }
+        write_compact(&compact_path, &content)?;
+        let meta = RunMeta {
+            raw_id: raw_id.clone(),
+            command: ast.original_command.clone(),
+            cwd: cwd.clone(),
+            started_at_unix_ms,
+            duration_ms,
+            exit_code,
+            adapter_name: adapter_name_for_meta.clone(),
+            raw_path: raw_path.clone(),
+            compact_path: compact_path.clone(),
+            channel: options.channel.clone(),
+            target_agent: options.target.as_str().to_string(),
+            invoked_as_shim: options.invoked_as_shim.clone(),
+            wf_core_version: crate::VERSION.to_string(),
+        };
+        write_meta_json(&meta_path, &meta, &final_result)?;
+    }
+
+    event_log::record_event(
+        &options.channel,
+        options.target,
+        &ast,
+        &final_result,
+        exit_code,
+        started_at_unix_ms,
+        duration_ms,
+        options.invoked_as_shim.as_deref(),
+    )?;
+
+    Ok(RunReport {
+        exit_code,
+        ast,
+        result: final_result,
+    })
+}
+
+/// List raw runs in the configured store, newest first.
+pub fn list_raw_runs(
+    channel: &str,
+    target: ProxyTarget,
+    limit: usize,
+) -> Result<Vec<RawRunSummary>, AppError> {
+    let root = raw_store_root(channel, target)?;
+    super::raw_store::list_runs(&root, limit)
+}
+
+/// Print the raw recovery contents for a single raw_id.
+pub fn print_raw(channel: &str, target: ProxyTarget, raw_id: &str) -> Result<i32, AppError> {
+    let root = raw_store_root(channel, target)?;
+    let dir = find_raw_dir(&root, raw_id)?;
+    println!("[wf-core] raw run {raw_id}");
+    println!("path: {}", crate::display_path(&dir));
+    let stdout = std::fs::read_to_string(dir.join("stdout.log")).unwrap_or_default();
+    let stderr = std::fs::read_to_string(dir.join("stderr.log")).unwrap_or_default();
+    if !stdout.is_empty() {
+        println!("\n[stdout]");
+        print!("{stdout}");
+        if !stdout.ends_with('\n') {
+            println!();
+        }
+    }
+    if !stderr.is_empty() {
+        println!("\n[stderr]");
+        eprint!("{stderr}");
+        if !stderr.ends_with('\n') {
+            eprintln!();
+        }
+    }
+    Ok(0)
+}
+
+pub fn print_raw_path(channel: &str, target: ProxyTarget, raw_id: &str) -> Result<i32, AppError> {
+    let root = raw_store_root(channel, target)?;
+    let dir = find_raw_dir(&root, raw_id)?;
+    println!("{}", crate::display_path(&dir));
+    Ok(0)
+}
+
+pub fn prevent_recursion_active() -> bool {
+    matches!(env::var(PROXY_RECURSION_ENV).ok().as_deref(), Some("1"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts_for_test(scratch: &std::path::Path) -> RunOptions {
+        env::set_var("WF_CORE_HOME", scratch);
+        RunOptions {
+            channel: "next".to_string(),
+            ..RunOptions::default()
+        }
+    }
+
+    #[test]
+    fn end_to_end_run_records_raw_and_event() {
+        let scratch = env::temp_dir().join(format!("wf-core-run-test-{}", now_unix_ms()));
+        let opts = opts_for_test(&scratch);
+        let report = run_proxy(&vec!["true".to_string()], opts).unwrap();
+        assert_eq!(report.exit_code, 0);
+        assert!(report.result.raw_path.exists());
+        let events = event_log::read_events(
+            &event_log::gain_events_path("next", ProxyTarget::Windsurf).unwrap(),
+        )
+        .unwrap();
+        assert!(!events.is_empty());
+        let _ = std::fs::remove_dir_all(&scratch);
+        env::remove_var("WF_CORE_HOME");
+    }
+
+    #[test]
+    fn json_redact_default_strips_secret_lines() {
+        let scratch = env::temp_dir().join(format!("wf-core-run-redact-{}", now_unix_ms()));
+        env::set_var("WF_CORE_HOME", &scratch);
+        let opts = RunOptions {
+            channel: "next".to_string(),
+            shell_mode: true,
+            ..RunOptions::default()
+        };
+        let report = run_proxy(
+            &vec!["printf 'GITHUB_TOKEN=ghp_abcdef\\nok\\n'".to_string()],
+            opts,
+        )
+        .unwrap();
+        assert!(report.result.stdout.contains("[redacted possible secret"));
+        let _ = std::fs::remove_dir_all(&scratch);
+        env::remove_var("WF_CORE_HOME");
+    }
+}

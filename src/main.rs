@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) mod adapters;
+pub(crate) mod proxy;
+
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MANAGED_START: &str = "<!-- wf-core managed:start -->";
 const MANAGED_END: &str = "<!-- wf-core managed:end -->";
 const DEFAULT_CHANNELS: &[&str] = &["stable", "next"];
@@ -70,33 +73,14 @@ const NOISY_ROOT_COMMANDS: &[&str] = &[
 
 const NOISY_GIT_SUBCOMMANDS: &[&str] = &["diff", "grep", "log", "show", "status"];
 const SHELL_MARKERS: &[&str] = &["|", "&&", "||", ";", ">", "<", "$(", "`"];
-const HIGH_SIGNAL_TERMS: &[&str] = &[
-    "error",
-    "failed",
-    "failure",
-    "fatal",
-    "panic",
-    "traceback",
-    "exception",
-    "assert",
-    "warning",
-    "denied",
-    "cannot",
-    "not found",
-    "unresolved",
-    "expected",
-    "actual",
-    "timeout",
-    "segmentation",
-];
 
 #[derive(Debug)]
-struct AppError {
-    message: String,
+pub(crate) struct AppError {
+    pub(crate) message: String,
 }
 
 impl AppError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -115,29 +99,10 @@ struct InstallSummary {
 }
 
 #[derive(Debug)]
-struct Compaction {
-    rendered: String,
-    compacted: bool,
-    raw_bytes: usize,
-    compacted_bytes: usize,
-    saved_bytes: usize,
-    high_signal_count: usize,
-    raw_path: PathBuf,
-}
-
-#[derive(Debug)]
 struct VerifyItem {
     surface: String,
     path: PathBuf,
     ok: bool,
-}
-
-#[derive(Default)]
-struct GainEvent {
-    raw_bytes: usize,
-    compacted_bytes: usize,
-    saved_bytes: usize,
-    compacted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +166,8 @@ fn run(arguments: Vec<String>) -> Result<i32, AppError> {
         "devin-hook" => command_devin_hook(&arguments[1..]),
         "rewrite" => command_rewrite(&arguments[1..]),
         "run" => command_run(&arguments[1..]),
+        "raw" => command_raw(&arguments[1..]),
+        "replay" => command_replay(&arguments[1..]),
         "gain" => command_gain(&arguments[1..]),
         "instructions" => {
             print_instructions();
@@ -229,9 +196,15 @@ Usage:
   wf-core workflow start|cockpit|finish [options]
   wf-core memory status|remember|recall|system-map [options]
   wf-core hook install|list|instructions [--target windsurf|devin|all] [--channel stable|next|insiders|both]
-  wf-core rewrite \"<command>\"
-  wf-core run [--channel next] [--max-lines N] [--max-bytes N] [--shell] -- <command>
-  wf-core gain [--channel next] [--json]
+  wf-core rewrite [--json] \"<command>\"
+  wf-core run [--channel next] [--target windsurf|devin] [--max-lines N] [--max-bytes N]
+              [--failure-max-lines N] [--shell] [--full] [--no-compact]
+              [--no-raw] [--no-redact] [--adapter NAME] [--list-adapters]
+              [--json] -- <command>
+  wf-core raw <raw_id> | --path <raw_id> | list [--limit N] | prune --older-than 30d
+  wf-core replay <raw_id> [--allow-risky]
+  wf-core gain [--channel next] [--target windsurf|devin] [--since 7d|today]
+              [--adapter NAME] [--json]
   wf-core instructions
   wf-core uninstall --yes [--channel stable|next|insiders|both]
 
@@ -899,128 +872,484 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
 }
 
 fn command_rewrite(arguments: &[String]) -> Result<i32, AppError> {
-    let command_text = arguments.join(" ").trim().to_string();
+    let as_json = has_flag(arguments, "--json");
+    let non_flag: Vec<String> = arguments
+        .iter()
+        .filter(|value| !value.starts_with("--"))
+        .cloned()
+        .collect();
+    let command_text = non_flag.join(" ").trim().to_string();
     if command_text.is_empty() {
-        return Err(AppError::new("Usage: wf-core rewrite \"<command>\""));
+        return Err(AppError::new(
+            "Usage: wf-core rewrite [--json] \"<command>\"",
+        ));
     }
     let (supported, reason) = is_supported_noisy_command(&command_text);
+    let needs_shell = requires_shell(&command_text);
+    let tokens: Vec<String> = if needs_shell {
+        vec![command_text.clone()]
+    } else {
+        command_text
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let ast = proxy::build_ast(
+        &tokens,
+        env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        needs_shell,
+        None,
+    );
+    let registry = proxy::default_registry();
+    let adapter = registry.pick(&ast);
+    let kind = ast.detected_kind.as_str().to_string();
+    let risk = if proxy::is_destructive(&ast.program, &ast.args) {
+        "high"
+    } else if proxy::is_interactive_command(&ast.program, &ast.args) {
+        "medium"
+    } else {
+        "low"
+    };
+    let wrapper = current_wrapper_command()?;
+    let rewritten = if needs_shell {
+        format!("{wrapper} run --shell -- {}", quote_arg(&command_text))
+    } else {
+        format!("{wrapper} run -- {command_text}")
+    };
+
+    if as_json {
+        println!(
+            "{{\n  \"originalCommand\": {},\n  \"rewrittenCommand\": {},\n  \"supported\": {},\n  \"reason\": {},\n  \"adapterName\": {},\n  \"kind\": {},\n  \"requiresShell\": {},\n  \"automaticShimSupported\": {},\n  \"risk\": {}\n}}",
+            json_string(&command_text),
+            json_string(&rewritten),
+            supported,
+            json_string(&reason),
+            json_string(adapter.name()),
+            json_string(&kind),
+            needs_shell,
+            supported,
+            json_string(risk)
+        );
+        return Ok(0);
+    }
+
     if !supported {
         return Err(AppError::new(reason));
     }
-    let wrapper = current_wrapper_command()?;
-    if requires_shell(&command_text) {
-        println!("{wrapper} run --shell -- {}", quote_arg(&command_text));
-    } else {
-        println!("{wrapper} run -- {command_text}");
-    }
+    println!("{rewritten}");
     Ok(0)
 }
 
 fn command_run(arguments: &[String]) -> Result<i32, AppError> {
     let option_arguments = arguments_before_separator(arguments);
+    if has_flag(option_arguments, "--list-adapters") {
+        let registry = proxy::default_registry();
+        for name in registry.names() {
+            println!("{name}");
+        }
+        return Ok(0);
+    }
+    let options = parse_run_options(option_arguments)?;
+    let command_args = positional_after_options(arguments);
+    if command_args.is_empty() {
+        return Err(AppError::new(
+            "Usage: wf-core run [options] -- <command> [args...]",
+        ));
+    }
+
+    let as_json = options.as_json;
+    let report = proxy::run_proxy(&command_args, options)?;
+
+    if as_json {
+        let stdout_field = json_string(&report.result.stdout);
+        let stderr_field = json_string(&report.result.stderr);
+        let summary_field = json_string(&report.result.summary);
+        let warnings = report
+            .result
+            .warnings
+            .iter()
+            .map(|warning| json_string(warning))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{{\n  \"command\": {},\n  \"exitCode\": {},\n  \"adapterName\": {},\n  \"kind\": {},\n  \"compacted\": {},\n  \"rawId\": {},\n  \"rawPath\": {},\n  \"compactPath\": {},\n  \"estimatedTokensBefore\": {},\n  \"estimatedTokensAfter\": {},\n  \"estimatedTokensSaved\": {},\n  \"savingsPct\": {:.4},\n  \"summary\": {},\n  \"stdout\": {},\n  \"stderr\": {},\n  \"warnings\": [{}]\n}}",
+            json_string(&report.ast.original_command),
+            report.exit_code,
+            json_string(&report.result.adapter_name),
+            json_string(report.ast.detected_kind.as_str()),
+            report.result.compacted,
+            json_string(&report.result.raw_id),
+            json_string(&display_path(&report.result.raw_path)),
+            json_string(&display_path(&report.result.compact_path)),
+            report.result.estimated_tokens_before,
+            report.result.estimated_tokens_after,
+            report.result.estimated_tokens_saved,
+            report.result.savings_pct,
+            summary_field,
+            stdout_field,
+            stderr_field,
+            warnings,
+        );
+    } else if report.result.compacted {
+        if !report.result.summary.is_empty() {
+            print!("{}", report.result.summary);
+            if !report.result.summary.ends_with('\n') {
+                println!();
+            }
+        }
+        if !report.result.stdout.is_empty() {
+            print!("{}", report.result.stdout);
+            if !report.result.stdout.ends_with('\n') {
+                println!();
+            }
+        }
+        if !report.result.stderr.is_empty() {
+            eprint!("{}", report.result.stderr);
+            if !report.result.stderr.ends_with('\n') {
+                eprintln!();
+            }
+        }
+    } else {
+        if !report.result.stdout.is_empty() {
+            print!("{}", report.result.stdout);
+            if !report.result.stdout.ends_with('\n') {
+                println!();
+            }
+        }
+        if !report.result.stderr.is_empty() {
+            eprint!("{}", report.result.stderr);
+            if !report.result.stderr.ends_with('\n') {
+                eprintln!();
+            }
+        }
+        if !report.result.summary.is_empty() {
+            print!("{}", report.result.summary);
+            if !report.result.summary.ends_with('\n') {
+                println!();
+            }
+        }
+    }
+
+    Ok(clamp_exit_code(report.exit_code))
+}
+
+fn parse_run_options(option_arguments: &[String]) -> Result<proxy::RunOptions, AppError> {
     let channel = flag_value(option_arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target_flag =
+        flag_value(option_arguments, "--target").unwrap_or_else(|| "windsurf".to_string());
+    let target = proxy::ProxyTarget::from_str(&target_flag);
     let max_lines = flag_value(option_arguments, "--max-lines")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(120);
     let max_bytes = flag_value(option_arguments, "--max-bytes")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(12_000);
-    let shell_mode = has_flag(option_arguments, "--shell");
-    let command_args = positional_after_options(arguments);
-    if command_args.is_empty() {
-        return Err(AppError::new(
-            "Usage: wf-core run [--shell] -- <command> [args...]",
-        ));
-    }
+    let failure_max_lines = flag_value(option_arguments, "--failure-max-lines")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(200);
+    let per_group_limit = flag_value(option_arguments, "--per-group-limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20);
+    Ok(proxy::RunOptions {
+        channel,
+        target,
+        shell_mode: has_flag(option_arguments, "--shell"),
+        full: has_flag(option_arguments, "--full"),
+        no_compact: has_flag(option_arguments, "--no-compact"),
+        no_raw: has_flag(option_arguments, "--no-raw"),
+        no_redact: has_flag(option_arguments, "--no-redact"),
+        as_json: has_flag(option_arguments, "--json"),
+        list_adapters: has_flag(option_arguments, "--list-adapters"),
+        forced_adapter: flag_value(option_arguments, "--adapter"),
+        budget: proxy::OutputBudget {
+            max_lines,
+            max_bytes,
+            failure_max_lines,
+            per_group_limit,
+        },
+        invoked_as_shim: flag_value(option_arguments, "--invoked-as-shim"),
+    })
+}
 
-    let started = now_millis();
-    let output = execute_command(&command_args, shell_mode)?;
-    let elapsed_ms = now_millis().saturating_sub(started);
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let raw_text = render_raw_output(&stdout, &stderr);
-    let display_command = command_args.join(" ");
-    let raw_path = save_raw_output(&channel, &display_command, &raw_text)?;
-    let compaction = compact_output(
-        &display_command,
-        output.status.code().unwrap_or(1),
-        &stdout,
-        &stderr,
-        raw_path,
-        max_lines,
-        max_bytes,
-        elapsed_ms,
+fn command_raw(arguments: &[String]) -> Result<i32, AppError> {
+    let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = proxy::ProxyTarget::from_str(
+        &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
     );
-    record_gain_event(
-        &channel,
-        &display_command,
-        output.status.code().unwrap_or(1),
-        &compaction,
-    )?;
 
-    if compaction.compacted {
-        print!("{}", compaction.rendered);
-        if !compaction.rendered.ends_with('\n') {
+    let positional: Vec<&String> = arguments
+        .iter()
+        .filter(|value| !value.starts_with("--"))
+        .collect();
+
+    let subcommand = positional.first().map(|value| value.as_str()).unwrap_or("");
+    match subcommand {
+        "list" => {
+            let limit = flag_value(arguments, "--limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(20);
+            let runs = proxy::list_raw_runs(&channel, target, limit)?;
+            if runs.is_empty() {
+                println!("(no raw runs recorded for channel {channel})");
+                return Ok(0);
+            }
+            for run in runs {
+                let exit = run
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                println!(
+                    "{}\texit={}\t{} bytes stdout, {} bytes stderr\t{}",
+                    run.raw_id, exit, run.stdout_bytes, run.stderr_bytes, run.command
+                );
+            }
+            Ok(0)
+        }
+        "prune" => {
+            let older_than = flag_value(arguments, "--older-than")
+                .ok_or_else(|| AppError::new("Usage: wf-core raw prune --older-than 30d"))?;
+            let span = proxy::parse_duration_ms(&older_than)
+                .ok_or_else(|| AppError::new(format!("unrecognized duration: {older_than}")))?;
+            let cutoff = proxy::now_unix_ms().saturating_sub(span);
+            let root = proxy::raw_store_root(&channel, target)?;
+            let removed = proxy::prune_older_than(&root, cutoff)?;
+            println!("pruned {removed} raw runs older than {older_than}");
+            Ok(0)
+        }
+        _ => {
+            // Positional argument may be a raw_id, or we got `--path <raw_id>`.
+            if let Some(raw_id) = flag_value(arguments, "--path") {
+                return proxy::print_raw_path(&channel, target, &raw_id);
+            }
+            let raw_id = positional.first().ok_or_else(|| {
+                AppError::new(
+                    "Usage: wf-core raw <raw_id> | --path <raw_id> | list | prune --older-than 30d",
+                )
+            })?;
+            proxy::print_raw(&channel, target, raw_id.as_str())
+        }
+    }
+}
+
+fn command_replay(arguments: &[String]) -> Result<i32, AppError> {
+    let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = proxy::ProxyTarget::from_str(
+        &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
+    );
+    let allow_risky = has_flag(arguments, "--allow-risky");
+    let positional: Vec<&String> = arguments
+        .iter()
+        .filter(|value| !value.starts_with("--"))
+        .collect();
+    let raw_id = positional
+        .first()
+        .ok_or_else(|| AppError::new("Usage: wf-core replay <raw_id> [--allow-risky]"))?;
+    let root = proxy::raw_store_root(&channel, target)?;
+    let dir = proxy::find_raw_dir(&root, raw_id.as_str())?;
+    let args_path = dir.join("args.json");
+    let command_path = dir.join("command.txt");
+    let meta_path = dir.join("meta.json");
+    let original = fs::read_to_string(&command_path)
+        .map_err(|error| AppError::new(format!("unable to read replay command: {error}")))?;
+    let original = original.trim().to_string();
+    if original.is_empty() {
+        return Err(AppError::new("replay command is empty"));
+    }
+    let cwd_text = fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|content| json_string_field(&content, "cwd"))
+        .unwrap_or_default();
+    let cwd = if cwd_text.is_empty() {
+        env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        PathBuf::from(cwd_text)
+    };
+    if !cwd.exists() {
+        return Err(AppError::new(format!(
+            "refusing to replay; original cwd {} no longer exists",
+            display_path(&cwd)
+        )));
+    }
+    let (tokens, shell_mode) = if args_path.exists() {
+        proxy::raw_store::load_args(&args_path)?
+    } else {
+        let needs_shell = requires_shell(&original);
+        let tokens: Vec<String> = if needs_shell {
+            vec![original.clone()]
+        } else {
+            original.split_whitespace().map(|s| s.to_string()).collect()
+        };
+        (tokens, needs_shell)
+    };
+    let ast = proxy::build_ast(&tokens, cwd.clone(), shell_mode, None);
+    if proxy::is_destructive(&ast.program, &ast.args) && !allow_risky {
+        return Err(AppError::new(format!(
+            "refusing to replay possibly destructive command; rerun with --allow-risky if you understand the impact: {original}"
+        )));
+    }
+    let options = proxy::RunOptions {
+        channel,
+        target,
+        shell_mode,
+        ..proxy::RunOptions::default()
+    };
+    env::set_current_dir(&cwd).ok();
+    let report = proxy::run_proxy(&tokens, options)?;
+    if !report.result.summary.is_empty() {
+        print!("{}", report.result.summary);
+        if !report.result.summary.ends_with('\n') {
             println!();
         }
-    } else {
-        if !stdout.is_empty() {
-            print!("{stdout}");
-            if !stdout.ends_with('\n') {
-                println!();
-            }
-        }
-        if !stderr.is_empty() {
-            eprint!("{stderr}");
-            if !stderr.ends_with('\n') {
-                eprintln!();
-            }
-        }
-        println!(
-            "[wf-core] raw output saved at {}",
-            display_path(&compaction.raw_path)
-        );
     }
-
-    Ok(clamp_exit_code(output.status.code().unwrap_or(1)))
+    Ok(clamp_exit_code(report.exit_code))
 }
 
 fn command_gain(arguments: &[String]) -> Result<i32, AppError> {
     let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = proxy::ProxyTarget::from_str(
+        &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
+    );
     let as_json = has_flag(arguments, "--json");
-    let events = read_gain_events(&channel)?;
-    let mut total_raw = 0usize;
-    let mut total_compacted = 0usize;
-    let mut total_saved = 0usize;
+    let since_filter =
+        flag_value(arguments, "--since").and_then(|value| proxy::parse_duration_ms(&value));
+    let adapter_filter = flag_value(arguments, "--adapter");
+
+    let events_path = proxy::gain_events_path(&channel, target)?;
+    let raw_events = proxy::read_events(&events_path)?;
+    let cutoff = since_filter.map(|span| proxy::now_unix_ms().saturating_sub(span));
+    let events: Vec<proxy::GainEventV2> = raw_events
+        .into_iter()
+        .filter(|event| cutoff.map(|c| event.timestamp_unix_ms >= c).unwrap_or(true))
+        .filter(|event| {
+            adapter_filter
+                .as_ref()
+                .map(|name| event.adapter_name.eq_ignore_ascii_case(name))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let mut total_tokens_before: usize = 0;
+    let mut total_tokens_after: usize = 0;
+    let mut total_tokens_saved: isize = 0;
     let mut compacted_events = 0usize;
+    let mut passthrough_events = 0usize;
+    let mut failures = 0usize;
+    let mut shim_events = 0usize;
+    let mut by_adapter: std::collections::BTreeMap<String, (usize, isize)> =
+        std::collections::BTreeMap::new();
+    let mut by_command: std::collections::BTreeMap<String, (usize, isize, f64)> =
+        std::collections::BTreeMap::new();
     for event in &events {
-        total_raw += event.raw_bytes;
-        total_compacted += event.compacted_bytes;
-        total_saved += event.saved_bytes;
+        total_tokens_before += event.estimated_tokens_before;
+        total_tokens_after += event.estimated_tokens_after;
+        total_tokens_saved += event.estimated_tokens_saved;
         if event.compacted {
             compacted_events += 1;
+        } else {
+            passthrough_events += 1;
         }
+        if event.exit_code != 0 {
+            failures += 1;
+        }
+        if event.invoked_as_shim.is_some() {
+            shim_events += 1;
+        }
+        let adapter_entry = by_adapter
+            .entry(event.adapter_name.clone())
+            .or_insert((0, 0));
+        adapter_entry.0 += 1;
+        adapter_entry.1 += event.estimated_tokens_saved;
+        let command_entry = by_command
+            .entry(event.command.clone())
+            .or_insert((0, 0, 0.0));
+        command_entry.0 += 1;
+        command_entry.1 += event.estimated_tokens_saved;
+        command_entry.2 = command_entry.2.max(event.savings_pct);
     }
-    let savings = savings_percent(total_raw, total_saved);
+
+    let savings_pct = if total_tokens_before > 0 {
+        (total_tokens_saved as f64 / total_tokens_before as f64) * 100.0
+    } else {
+        0.0
+    };
+
     if as_json {
+        let mut by_adapter_json = String::new();
+        for (index, (name, (count, saved))) in by_adapter.iter().enumerate() {
+            if index > 0 {
+                by_adapter_json.push(',');
+            }
+            by_adapter_json.push_str(&format!(
+                "{{\"name\":{},\"events\":{},\"tokensSaved\":{}}}",
+                json_string(name),
+                count,
+                saved
+            ));
+        }
+        let mut by_command_json = String::new();
+        let mut command_rows: Vec<(&String, &(usize, isize, f64))> = by_command.iter().collect();
+        command_rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        for (index, (command, (count, saved, pct))) in command_rows.iter().take(5).enumerate() {
+            if index > 0 {
+                by_command_json.push(',');
+            }
+            by_command_json.push_str(&format!(
+                "{{\"command\":{},\"events\":{},\"tokensSaved\":{},\"savingsPct\":{:.4}}}",
+                json_string(command),
+                count,
+                saved,
+                pct
+            ));
+        }
         println!(
-            "{{\n  \"channel\": {},\n  \"events\": {},\n  \"compactedEvents\": {},\n  \"rawBytes\": {},\n  \"compactedBytes\": {},\n  \"savedBytes\": {},\n  \"savingsPercent\": {:.2}\n}}",
+            "{{\n  \"channel\": {},\n  \"target\": {},\n  \"events\": {},\n  \"compacted\": {},\n  \"passthrough\": {},\n  \"failures\": {},\n  \"shimEvents\": {},\n  \"estimatedTokensBefore\": {},\n  \"estimatedTokensAfter\": {},\n  \"estimatedTokensSaved\": {},\n  \"savingsPct\": {:.4},\n  \"byAdapter\": [{}],\n  \"topCommands\": [{}]\n}}",
             json_string(&channel),
+            json_string(target.as_str()),
             events.len(),
             compacted_events,
-            total_raw,
-            total_compacted,
-            total_saved,
-            savings
+            passthrough_events,
+            failures,
+            shim_events,
+            total_tokens_before,
+            total_tokens_after,
+            total_tokens_saved,
+            savings_pct,
+            by_adapter_json,
+            by_command_json
         );
     } else {
         println!("wf-core token savings");
-        println!("  Channel: {channel}");
-        println!("  Events: {}", events.len());
-        println!("  Compacted events: {compacted_events}");
-        println!("  Raw bytes: {total_raw}");
-        println!("  Compacted bytes: {total_compacted}");
-        println!("  Saved bytes: {total_saved} ({savings:.2}%)");
+        println!("channel: {channel}");
+        println!("target: {}", target.as_str());
+        println!("events: {}", events.len());
+        println!("compacted: {compacted_events}");
+        println!("passthrough: {passthrough_events}");
+        println!("failures: {failures}");
+        println!("shim usage: {shim_events}");
+        println!();
+        println!("estimated tokens:");
+        println!("before: {total_tokens_before}");
+        println!("after: {total_tokens_after}");
+        println!("saved: {total_tokens_saved}");
+        println!("savings: {savings_pct:.1}%");
+        if !by_adapter.is_empty() {
+            println!();
+            println!("by adapter:");
+            let mut rows: Vec<(&String, &(usize, isize))> = by_adapter.iter().collect();
+            rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+            for (name, (count, saved)) in rows {
+                println!("{name:<12} {saved:>10} saved ({count} events)");
+            }
+        }
+        if !by_command.is_empty() {
+            println!();
+            println!("top commands:");
+            let mut rows: Vec<(&String, &(usize, isize, f64))> = by_command.iter().collect();
+            rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+            for (index, (command, (_, saved, pct))) in rows.iter().take(5).enumerate() {
+                println!("{}. {command} {saved} saved, {pct:.1}%", index + 1);
+            }
+        }
     }
     Ok(0)
 }
@@ -2226,198 +2555,6 @@ fn render_findings_json(valid: bool, path: &Path, findings: &[String]) -> String
     output
 }
 
-fn execute_command(command_args: &[String], shell_mode: bool) -> Result<Output, AppError> {
-    if shell_mode {
-        let command_text = command_args.join(" ");
-        let mut command = if cfg!(windows) {
-            let mut cmd = Command::new("cmd");
-            cmd.arg("/C").arg(command_text);
-            cmd
-        } else {
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg(command_text);
-            cmd
-        };
-        Ok(command.output()?)
-    } else {
-        let mut command = Command::new(&command_args[0]);
-        if command_args.len() > 1 {
-            command.args(&command_args[1..]);
-        }
-        Ok(command.output()?)
-    }
-}
-
-fn compact_output(
-    command: &str,
-    exit_code: i32,
-    stdout: &str,
-    stderr: &str,
-    raw_path: PathBuf,
-    max_lines: usize,
-    max_bytes: usize,
-    elapsed_ms: u128,
-) -> Compaction {
-    let raw = render_raw_output(stdout, stderr);
-    let raw_bytes = raw.as_bytes().len();
-    let lines: Vec<&str> = raw.lines().collect();
-    let high_signal_indexes: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            if is_high_signal(line) {
-                Some(index)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let should_compact = raw_bytes > max_bytes || lines.len() > max_lines;
-    if !should_compact {
-        return Compaction {
-            rendered: raw,
-            compacted: false,
-            raw_bytes,
-            compacted_bytes: raw_bytes,
-            saved_bytes: 0,
-            high_signal_count: high_signal_indexes.len(),
-            raw_path,
-        };
-    }
-
-    let mut selected = HashSet::new();
-    for index in high_signal_indexes.iter().take(80) {
-        let start = index.saturating_sub(2);
-        let end = (*index + 3).min(lines.len());
-        for candidate in start..end {
-            selected.insert(candidate);
-        }
-    }
-    let mut selected_indexes: Vec<usize> = selected.into_iter().collect();
-    selected_indexes.sort_unstable();
-
-    let mut rendered = String::new();
-    rendered.push_str("[wf-core] compacted command output\n");
-    rendered.push_str(&format!("command: {command}\n"));
-    rendered.push_str(&format!("exit code: {exit_code}\n"));
-    rendered.push_str(&format!("elapsed: {elapsed_ms} ms\n"));
-    rendered.push_str(&format!("raw: {raw_bytes} bytes, {} lines\n", lines.len()));
-    rendered.push_str(&format!(
-        "high-signal lines: {}\n",
-        high_signal_indexes.len()
-    ));
-    rendered.push_str(&format!("raw output: {}\n\n", display_path(&raw_path)));
-
-    if !selected_indexes.is_empty() {
-        rendered.push_str("## High Signal\n");
-        let mut seen = HashSet::new();
-        for index in selected_indexes {
-            let line = lines[index];
-            if seen.insert(line) {
-                rendered.push_str(line);
-                rendered.push('\n');
-            }
-        }
-        rendered.push('\n');
-    }
-
-    rendered.push_str("## Head\n");
-    for line in lines.iter().take(30) {
-        rendered.push_str(line);
-        rendered.push('\n');
-    }
-    rendered.push('\n');
-
-    if lines.len() > 40 {
-        rendered.push_str("## Tail\n");
-        for line in lines.iter().skip(lines.len().saturating_sub(40)) {
-            rendered.push_str(line);
-            rendered.push('\n');
-        }
-    }
-
-    let compacted_bytes = rendered.as_bytes().len();
-    Compaction {
-        rendered,
-        compacted: true,
-        raw_bytes,
-        compacted_bytes,
-        saved_bytes: raw_bytes.saturating_sub(compacted_bytes),
-        high_signal_count: high_signal_indexes.len(),
-        raw_path,
-    }
-}
-
-fn render_raw_output(stdout: &str, stderr: &str) -> String {
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (false, false) => format!("[stdout]\n{stdout}\n[stderr]\n{stderr}"),
-        (false, true) => stdout.to_string(),
-        (true, false) => stderr.to_string(),
-        (true, true) => String::new(),
-    }
-}
-
-fn save_raw_output(channel: &str, command: &str, raw_text: &str) -> Result<PathBuf, AppError> {
-    let output_dir = channel_home(channel)?.join("wf-core").join("raw-output");
-    fs::create_dir_all(&output_dir)?;
-    let file_name = format!("{}-{}.log", now_millis(), slugify(command));
-    let path = output_dir.join(file_name);
-    fs::write(&path, raw_text)?;
-    Ok(path)
-}
-
-fn record_gain_event(
-    channel: &str,
-    command: &str,
-    exit_code: i32,
-    compaction: &Compaction,
-) -> Result<(), AppError> {
-    let event_path = gain_events_path(channel)?;
-    if let Some(parent) = event_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let event = format!(
-        "{{\"time\":{},\"command\":{},\"exitCode\":{},\"compacted\":{},\"rawBytes\":{},\"compactedBytes\":{},\"savedBytes\":{},\"highSignalCount\":{},\"rawPath\":{}}}\n",
-        now_millis() / 1000,
-        json_string(command),
-        exit_code,
-        compaction.compacted,
-        compaction.raw_bytes,
-        compaction.compacted_bytes,
-        compaction.saved_bytes,
-        compaction.high_signal_count,
-        json_string(&display_path(&compaction.raw_path))
-    );
-    append_text(&event_path, &event)?;
-    Ok(())
-}
-
-fn read_gain_events(channel: &str) -> Result<Vec<GainEvent>, AppError> {
-    let path = gain_events_path(channel)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(path)?;
-    let mut events = Vec::new();
-    for line in content.lines() {
-        let event = GainEvent {
-            raw_bytes: json_number_field(line, "rawBytes").unwrap_or(0),
-            compacted_bytes: json_number_field(line, "compactedBytes").unwrap_or(0),
-            saved_bytes: json_number_field(line, "savedBytes").unwrap_or(0),
-            compacted: json_bool_field(line, "compacted").unwrap_or(false),
-        };
-        events.push(event);
-    }
-    Ok(events)
-}
-
-fn gain_events_path(channel: &str) -> Result<PathBuf, AppError> {
-    Ok(channel_home(channel)?
-        .join("wf-core")
-        .join("gain")
-        .join("events.jsonl"))
-}
-
 fn is_supported_noisy_command(command_text: &str) -> (bool, String) {
     let tokens = split_command_for_detection(command_text);
     if tokens.is_empty() {
@@ -2473,11 +2610,6 @@ fn requires_shell(command_text: &str) -> bool {
     SHELL_MARKERS
         .iter()
         .any(|marker| command_text.contains(marker))
-}
-
-fn is_high_signal(line: &str) -> bool {
-    let lowered = line.to_ascii_lowercase();
-    HIGH_SIGNAL_TERMS.iter().any(|term| lowered.contains(term))
 }
 
 fn resolve_source_root(raw: Option<String>) -> Result<PathBuf, AppError> {
@@ -2609,11 +2741,11 @@ fn home_dir() -> Result<PathBuf, AppError> {
     Err(AppError::new("unable to resolve home directory"))
 }
 
-fn channel_home(channel: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn channel_home(channel: &str) -> Result<PathBuf, AppError> {
     Ok(codeium_root()?.join(channel_directory_name(channel)?))
 }
 
-fn devin_home() -> Result<PathBuf, AppError> {
+pub(crate) fn devin_home() -> Result<PathBuf, AppError> {
     if let Ok(value) = env::var("DEVIN_HOME") {
         if !value.trim().is_empty() {
             return Ok(PathBuf::from(value));
@@ -3324,7 +3456,7 @@ fn devin_pre_tool_use_entry_json(binary: &Path) -> String {
     )
 }
 
-fn append_text(path: &Path, content: &str) -> Result<(), AppError> {
+pub(crate) fn append_text(path: &Path, content: &str) -> Result<(), AppError> {
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -3567,18 +3699,18 @@ fn clean_path(path: &Path) -> PathBuf {
     }
 }
 
-fn now_millis() -> u128 {
+pub(crate) fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
 }
 
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     let mut output = String::from("\"");
     for character in value.chars() {
         match character {
@@ -3594,7 +3726,7 @@ fn json_string(value: &str) -> String {
     output
 }
 
-fn json_string_field(content: &str, field: &str) -> Option<String> {
+pub(crate) fn json_string_field(content: &str, field: &str) -> Option<String> {
     let pattern = format!("\"{field}\"");
     let field_start = content.find(&pattern)?;
     let after_field = &content[field_start + pattern.len()..];
@@ -3650,7 +3782,7 @@ fn json_array_has_value(content: &str, field: &str) -> bool {
         .any(|item| !item.trim().trim_matches('"').is_empty())
 }
 
-fn json_number_field(line: &str, field: &str) -> Option<usize> {
+pub(crate) fn json_number_field(line: &str, field: &str) -> Option<usize> {
     let pattern = format!("\"{field}\":");
     let start = line.find(&pattern)? + pattern.len();
     let rest = &line[start..];
@@ -3662,7 +3794,7 @@ fn json_number_field(line: &str, field: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
-fn json_bool_field(line: &str, field: &str) -> Option<bool> {
+pub(crate) fn json_bool_field(line: &str, field: &str) -> Option<bool> {
     let pattern = format!("\"{field}\":");
     let start = line.find(&pattern)? + pattern.len();
     let rest = line[start..].trim_start();
@@ -3675,6 +3807,7 @@ fn json_bool_field(line: &str, field: &str) -> Option<bool> {
     }
 }
 
+#[allow(dead_code)]
 fn savings_percent(raw_bytes: usize, saved_bytes: usize) -> f64 {
     if raw_bytes == 0 {
         0.0
@@ -3740,25 +3873,45 @@ mod tests {
     }
 
     #[test]
-    fn compact_output_keeps_high_signal() {
-        let stdout = (0..160)
-            .map(|index| format!("line {index}"))
-            .chain(std::iter::once("ERROR: important failure".to_string()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let compaction = compact_output(
-            "pytest -q",
-            1,
-            &stdout,
-            "",
-            PathBuf::from("raw.log"),
-            20,
-            1000,
-            10,
+    fn proxy_generic_adapter_keeps_high_signal() {
+        use crate::adapters::generic::GenericAdapter;
+        use crate::proxy::adapter::{CommandAdapter, OutputBudget, RawRun, RunMeta};
+        let stdout: Vec<u8> = (0..160)
+            .map(|index| format!("line {index}\n"))
+            .chain(std::iter::once("ERROR: important failure\n".to_string()))
+            .collect::<String>()
+            .into_bytes();
+        let run = RawRun {
+            stdout,
+            stderr: Vec::new(),
+            exit_code: 1,
+            duration_ms: 10,
+        };
+        let ast = crate::proxy::build_ast(
+            &vec!["pytest".to_string(), "-q".to_string()],
+            PathBuf::from("/tmp"),
+            false,
+            None,
         );
-        assert!(compaction.compacted);
-        assert!(compaction.rendered.contains("ERROR: important failure"));
-        assert!(compaction.rendered.contains("raw.log"));
+        let meta = RunMeta {
+            raw_id: "rid".into(),
+            command: "pytest -q".into(),
+            cwd: PathBuf::from("/tmp"),
+            started_at_unix_ms: 0,
+            duration_ms: 10,
+            exit_code: 1,
+            adapter_name: "generic".into(),
+            raw_path: PathBuf::from("raw.log"),
+            compact_path: PathBuf::from("compact.txt"),
+            channel: "next".into(),
+            target_agent: "windsurf".into(),
+            invoked_as_shim: None,
+            wf_core_version: "test".into(),
+        };
+        let result = GenericAdapter.compact(&ast, &run, &meta, OutputBudget::default());
+        assert!(result.compacted);
+        assert!(result.summary.contains("ERROR: important failure"));
+        assert!(result.summary.contains("raw: wf-core raw rid"));
     }
 
     #[test]
