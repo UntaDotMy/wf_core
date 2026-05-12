@@ -913,11 +913,21 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                     .output();
                 match output_result {
                     Ok(output) => {
-                        io::stdout().write_all(&output.stdout)?;
-                        io::stderr().write_all(&output.stderr)?;
+                        let compact = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if !stderr.is_empty() {
+                            let _ = io::stderr().write_all(stderr.as_bytes());
+                            let _ = io::stderr().flush();
+                        }
+                        println!(
+                            "{{\"decision\":\"block\",\"reason\":{}}}",
+                            json_string(&format!(
+                                "Command auto-proxied through wf-core:\n{}",
+                                compact
+                            ))
+                        );
                         let _ = io::stdout().flush();
-                        let _ = io::stderr().flush();
-                        std::process::exit(output.status.code().unwrap_or(1));
+                        std::process::exit(0);
                     }
                     Err(e) => {
                         // Fallback: emit the block message so the framework still
