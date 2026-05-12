@@ -913,24 +913,23 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                     .output();
                 match output_result {
                     Ok(output) => {
+                        let exit_code = output.status.code().unwrap_or(1);
                         let compact = String::from_utf8_lossy(&output.stdout);
                         let stderr = String::from_utf8_lossy(&output.stderr);
-                        // Emit block JSON with the compact output as the reason so
-                        // Devin doesn't execute the original command (double execution).
-                        // The agent sees the compact output in the block message.
+                        let mut reason = format!(
+                            "Command auto-proxied through wf-core (exit: {}):\n{}",
+                            exit_code, compact
+                        );
                         if !stderr.is_empty() {
-                            let _ = io::stderr().write_all(stderr.as_bytes());
-                            let _ = io::stderr().flush();
+                            reason.push_str("\nstderr:\n");
+                            reason.push_str(&stderr);
                         }
                         println!(
                             "{{\"decision\":\"block\",\"reason\":{}}}",
-                            json_string(&format!(
-                                "Command auto-proxied through wf-core:\n{}",
-                                compact
-                            ))
+                            json_string(&reason)
                         );
                         let _ = io::stdout().flush();
-                        std::process::exit(0);
+                        std::process::exit(exit_code);
                     }
                     Err(e) => {
                         // Fallback: emit the block message so the framework still
