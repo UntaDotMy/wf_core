@@ -166,6 +166,9 @@ fn run(arguments: Vec<String>) -> Result<i32, AppError> {
         "devin-hook" => command_devin_hook(&arguments[1..]),
         "rewrite" => command_rewrite(&arguments[1..]),
         "run" => command_run(&arguments[1..]),
+        "dispatch" => command_dispatch(&arguments[1..]),
+        "shim" => command_shim(&arguments[1..]),
+        "shell" => command_shell(&arguments[1..]),
         "raw" => command_raw(&arguments[1..]),
         "replay" => command_replay(&arguments[1..]),
         "gain" => command_gain(&arguments[1..]),
@@ -201,6 +204,9 @@ Usage:
               [--failure-max-lines N] [--shell] [--full] [--no-compact]
               [--no-raw] [--no-redact] [--adapter NAME] [--list-adapters]
               [--json] -- <command>
+  wf-core shim install|uninstall|list|doctor [--channel stable|next|insiders|both] [--target windsurf|devin|all]
+  wf-core shell init [--channel next] [--target windsurf|devin] [--shell bash|zsh|fish|powershell|cmd]
+  wf-core dispatch --shim-name NAME [--channel next] [--target windsurf|devin] -- <args...>
   wf-core raw <raw_id> | --path <raw_id> | list [--limit N] | prune --older-than 30d
   wf-core replay <raw_id> [--allow-risky]
   wf-core gain [--channel next] [--target windsurf|devin] [--since 7d|today]
@@ -381,6 +387,14 @@ fn print_devin_status() -> Result<(), AppError> {
 }
 
 fn command_doctor(arguments: &[String]) -> Result<i32, AppError> {
+    if has_flag(arguments, "--proxy") {
+        let shim_code = command_shim_doctor(arguments)?;
+        let registry = proxy::default_registry();
+        println!("[ok] adapters: {}", registry.names().join(", "));
+        let rewrite_args = vec!["--json".to_string(), "cargo test".to_string()];
+        let _ = command_rewrite(&rewrite_args);
+        return Ok(shim_code);
+    }
     let status_code = command_status(arguments)?;
     println!();
     let verify_code = command_verify(arguments)?;
@@ -1033,6 +1047,233 @@ fn command_run(arguments: &[String]) -> Result<i32, AppError> {
     Ok(clamp_exit_code(report.exit_code))
 }
 
+fn command_dispatch(arguments: &[String]) -> Result<i32, AppError> {
+    let option_arguments = arguments_before_separator(arguments);
+    let shim_name = flag_value(option_arguments, "--shim-name")
+        .ok_or_else(|| AppError::new("Usage: wf-core dispatch --shim-name <name> -- <args...>"))?;
+    let channel = flag_value(option_arguments, "--channel")
+        .or_else(|| env::var("WF_CORE_CHANNEL").ok())
+        .unwrap_or_else(|| "next".to_string());
+    let target = proxy::ProxyTarget::from_str(
+        &flag_value(option_arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
+    );
+    let args = if let Some(index) = arguments.iter().position(|argument| argument == "--") {
+        arguments[index + 1..].to_vec()
+    } else {
+        collect_positional(arguments, &["--shim-name", "--channel", "--target"], &[])
+            .into_iter()
+            .skip_while(|value| value == "dispatch")
+            .collect()
+    };
+    proxy::dispatch_command(proxy::DispatchOptions {
+        channel,
+        target,
+        shim_name,
+        args,
+    })
+}
+
+fn command_shim(arguments: &[String]) -> Result<i32, AppError> {
+    if arguments.is_empty() {
+        return Err(AppError::new(
+            "Usage: wf-core shim install|uninstall|list|doctor [--channel next] [--target windsurf|devin|all]",
+        ));
+    }
+    let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string());
+    let channels = if target == "devin" {
+        vec![channel.clone()]
+    } else {
+        expand_channels(&channel)?
+    };
+    let targets = expand_targets(&target)?;
+    match arguments[0].as_str() {
+        "install" => {
+            let mut installed = 0usize;
+            for target_name in &targets {
+                match target_name.as_str() {
+                    "windsurf" => {
+                        for channel_name in &channels {
+                            let paths = proxy::install_shims(&proxy::ShimInstallOptions {
+                                channel: channel_name.clone(),
+                                target: proxy::ProxyTarget::Windsurf,
+                            })?;
+                            installed += paths.len();
+                            println!(
+                                "{channel_name}: shims installed at {}",
+                                display_path(&proxy::shim_dir(
+                                    channel_name,
+                                    proxy::ProxyTarget::Windsurf
+                                )?)
+                            );
+                        }
+                    }
+                    "devin" => {
+                        let paths = proxy::install_shims(&proxy::ShimInstallOptions {
+                            channel: "next".to_string(),
+                            target: proxy::ProxyTarget::Devin,
+                        })?;
+                        installed += paths.len();
+                        println!(
+                            "devin: shims installed at {}",
+                            display_path(&proxy::shim_dir("next", proxy::ProxyTarget::Devin)?)
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            println!("installed {installed} managed shim files");
+            Ok(0)
+        }
+        "uninstall" => {
+            let mut removed = 0usize;
+            for target_name in &targets {
+                match target_name.as_str() {
+                    "windsurf" => {
+                        for channel_name in &channels {
+                            removed += proxy::uninstall_shims(&proxy::ShimInstallOptions {
+                                channel: channel_name.clone(),
+                                target: proxy::ProxyTarget::Windsurf,
+                            })?;
+                        }
+                    }
+                    "devin" => {
+                        removed += proxy::uninstall_shims(&proxy::ShimInstallOptions {
+                            channel: "next".to_string(),
+                            target: proxy::ProxyTarget::Devin,
+                        })?;
+                    }
+                    _ => {}
+                }
+            }
+            println!("removed {removed} managed shim files");
+            Ok(0)
+        }
+        "list" => {
+            for target_name in &targets {
+                match target_name.as_str() {
+                    "windsurf" => {
+                        for channel_name in &channels {
+                            println!("{channel_name}:");
+                            for (name, path, installed) in
+                                proxy::list_shims(&proxy::ShimInstallOptions {
+                                    channel: channel_name.clone(),
+                                    target: proxy::ProxyTarget::Windsurf,
+                                })?
+                            {
+                                println!(
+                                    "  {} {:<10} {}",
+                                    if installed { "[ok]" } else { "[missing]" },
+                                    name,
+                                    display_path(&path)
+                                );
+                            }
+                        }
+                    }
+                    "devin" => {
+                        println!("devin:");
+                        for (name, path, installed) in
+                            proxy::list_shims(&proxy::ShimInstallOptions {
+                                channel: "next".to_string(),
+                                target: proxy::ProxyTarget::Devin,
+                            })?
+                        {
+                            println!(
+                                "  {} {:<10} {}",
+                                if installed { "[ok]" } else { "[missing]" },
+                                name,
+                                display_path(&path)
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(0)
+        }
+        "doctor" => command_shim_doctor(arguments),
+        other => Err(AppError::new(format!("unknown shim command: {other}"))),
+    }
+}
+
+fn command_shell(arguments: &[String]) -> Result<i32, AppError> {
+    if arguments.first().map(String::as_str) != Some("init") {
+        return Err(AppError::new(
+            "Usage: wf-core shell init [--channel next] [--target windsurf|devin] [--shell bash|zsh|fish|powershell|cmd]",
+        ));
+    }
+    let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = proxy::ProxyTarget::from_str(
+        &flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string()),
+    );
+    let shell = flag_value(arguments, "--shell")
+        .or_else(|| {
+            env::var("SHELL").ok().and_then(|s| {
+                Path::new(&s)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+        })
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "powershell".to_string()
+            } else {
+                "bash".to_string()
+            }
+        });
+    proxy::print_shell_init(&proxy::ShellInitOptions {
+        channel,
+        target,
+        shell,
+    })?;
+    Ok(0)
+}
+
+fn command_shim_doctor(arguments: &[String]) -> Result<i32, AppError> {
+    let channel = flag_value(arguments, "--channel").unwrap_or_else(|| "next".to_string());
+    let target = flag_value(arguments, "--target").unwrap_or_else(|| "windsurf".to_string());
+    let channels = if target == "devin" {
+        vec![channel.clone()]
+    } else {
+        expand_channels(&channel)?
+    };
+    let targets = expand_targets(&target)?;
+    let mut warnings = 0usize;
+    println!("wf-core shim doctor");
+    for target_name in targets {
+        match target_name.as_str() {
+            "windsurf" => {
+                for channel_name in &channels {
+                    println!("channel: {channel_name}");
+                    let (ok, warn) =
+                        proxy::shim_doctor(channel_name, proxy::ProxyTarget::Windsurf)?;
+                    warnings += warn.len();
+                    for line in ok {
+                        println!("[ok] {line}");
+                    }
+                    for line in warn {
+                        println!("[warn] {line}");
+                    }
+                }
+            }
+            "devin" => {
+                println!("target: devin");
+                let (ok, warn) = proxy::shim_doctor("next", proxy::ProxyTarget::Devin)?;
+                warnings += warn.len();
+                for line in ok {
+                    println!("[ok] {line}");
+                }
+                for line in warn {
+                    println!("[warn] {line}");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(if warnings == 0 { 0 } else { 1 })
+}
+
 fn parse_run_options(option_arguments: &[String]) -> Result<proxy::RunOptions, AppError> {
     let channel = flag_value(option_arguments, "--channel").unwrap_or_else(|| "next".to_string());
     let target_flag =
@@ -1068,6 +1309,7 @@ fn parse_run_options(option_arguments: &[String]) -> Result<proxy::RunOptions, A
             per_group_limit,
         },
         invoked_as_shim: flag_value(option_arguments, "--invoked-as-shim"),
+        executable_override: None,
     })
 }
 
@@ -3887,7 +4129,7 @@ fn quote_arg(value: &str) -> String {
     }
 }
 
-fn clamp_exit_code(value: i32) -> i32 {
+pub(crate) fn clamp_exit_code(value: i32) -> i32 {
     value.clamp(0, 255)
 }
 
