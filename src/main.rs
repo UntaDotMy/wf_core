@@ -941,12 +941,6 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                             reason.push_str("\nstderr:\n");
                             reason.push_str(&stderr);
                         }
-                        let mut reason =
-                            format!("Command auto-proxied through wf-core:\n{}", compact);
-                        if !stderr.is_empty() {
-                            reason.push_str(&format!("\n[stderr]\n{}", stderr));
-                        }
-                        reason.push_str(&format!("\n[exit code: {}]", exit_code));
                         println!(
                             "{{\"decision\":\"block\",\"reason\":{}}}",
                             json_string(&reason)
