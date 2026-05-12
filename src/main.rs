@@ -48,14 +48,17 @@ const OLD_MANAGED_WORKFLOW_NAMES: &[&str] = &[
 const MANIFEST_FILE_NAME: &str = "manifest.tsv";
 
 const NOISY_ROOT_COMMANDS: &[&str] = &[
+    "ansible", "ansible-playbook",
     "bun",
     "cargo",
-    "docker",
-    "docker-compose",
+    "cmake", "cpack", "ctest",
+    "curl", "wget",
+    "docker", "docker-compose",
     "dotnet",
+    "eslint",
+    "gh",
     "go",
-    "gradle",
-    "gradlew",
+    "gradle", "gradlew",
     "helm",
     "java",
     "jest",
@@ -63,11 +66,17 @@ const NOISY_ROOT_COMMANDS: &[&str] = &[
     "make",
     "mvn",
     "node",
-    "npm",
+    "npm", "npx",
+    "pip", "pip3",
     "pnpm",
+    "prettier",
     "pytest",
+    "ruff",
+    "rsync",
+    "ssh",
     "terraform",
     "tsc",
+    "vitest",
     "yarn",
 ];
 
@@ -891,6 +900,7 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
         .unwrap_or("pre-tool-use");
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
+
     match hook_kind {
         "pre-tool-use" => {
             let command = json_string_field(&input, "command").unwrap_or_default();
@@ -902,13 +912,12 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
             }
             let (supported, _) = is_supported_noisy_command(&command);
             if supported {
-                // Auto-proxy: execute the noisy command through wf-core run and
-                // return compacted output directly.  This avoids the "Tool blocked"
-                // state entirely, so both cheap and expensive models see the same
-                // result without needing to recover from a block message.
+                // Transparent auto-rewrite: proxy the command through wf-core run
+                // and return compacted output. No "block" state, no fallback —
+                // every model sees the same result regardless of size.
                 let exe = env::current_exe()?;
                 let needs_shell = requires_shell(&command);
-                let output_result = if needs_shell {
+                let output = if needs_shell {
                     std::process::Command::new(&exe)
                         .args(["run", "--shell", "--", &command])
                         .stdin(std::process::Stdio::null())
@@ -919,26 +928,16 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                         .stdin(std::process::Stdio::null())
                         .output()
                 };
-                match output_result {
+                match output {
                     Ok(output) => {
                         io::stdout().write_all(&output.stdout)?;
                         io::stderr().write_all(&output.stderr)?;
                         std::process::exit(output.status.code().unwrap_or(0));
                     }
                     Err(e) => {
-                        // Fallback: emit the block message so the framework still
-                        // surfaces a rerun suggestion.
-                        let wrapper = current_wrapper_command()?;
-                        let rerun = if needs_shell {
-                            format!("{wrapper} run --shell -- {}", quote_arg(&command))
-                        } else {
-                            format!("{wrapper} run -- {command}")
-                        };
-                        eprintln!("[wf-core] auto-proxy failed ({e}); falling back to block");
-                        println!(
-                            "{{\"decision\":\"block\",\"reason\":{}}}",
-                            json_string(&format!("Rerun that as: {rerun}"))
-                        );
+                        return Err(AppError::new(format!(
+                            "auto-proxy failed: {e}; cannot run command"
+                        )));
                     }
                 }
             }
