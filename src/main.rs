@@ -924,27 +924,17 @@ fn command_devin_hook(arguments: &[String]) -> Result<i32, AppError> {
                 // and return compacted output. No "block" state, no fallback —
                 // every model sees the same result regardless of size.
                 let exe = env::current_exe()?;
-                let needs_shell = requires_shell(&command);
-                let output = if needs_shell {
-                    std::process::Command::new(&exe)
-                        .args(["run", "--shell", "--", &command])
-                        .stdin(std::process::Stdio::null())
-                        .output()
-                } else {
-                    let mut run_args: Vec<String> = vec!["run".to_string(), "--".to_string()];
-                    run_args.extend(command.split_whitespace().map(String::from));
-                    std::process::Command::new(&exe)
-                        .args(&run_args)
-                        .stdin(std::process::Stdio::null())
-                        .output()
-                };
+                let output = std::process::Command::new(&exe)
+                    .args(["run", "--shell", "--", &command])
+                    .stdin(std::process::Stdio::null())
+                    .output();
                 match output {
                     Ok(output) => {
                         io::stdout().write_all(&output.stdout)?;
                         io::stderr().write_all(&output.stderr)?;
                         let _ = io::stdout().flush();
                         let _ = io::stderr().flush();
-                        std::process::exit(output.status.code().unwrap_or(0));
+                        std::process::exit(output.status.code().unwrap_or(1));
                     }
                     Err(e) => {
                         return Err(AppError::new(format!(
