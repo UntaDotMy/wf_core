@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh pr *)",
+      "WebSearch",
+      "Bash(rustc --version)",
+      "Bash(cargo check *)",
+      "Bash(cargo test *)",
+      "Bash(cargo build *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git checkout *)",
+      "Bash(git pull *)",
+      "Bash(git cherry-pick *)"
+    ]
+  }
+}

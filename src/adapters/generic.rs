@@ -1,8 +1,7 @@
 use crate::proxy::adapter::{CommandAdapter, CompactResult, OutputBudget, RawRun, RunMeta};
 use crate::proxy::command_ast::{CommandAst, CommandKind};
 use crate::proxy::render::{
-    collapse_repeats, dedupe_lines, head_tail_snapshot, is_high_signal, raw_recovery_line,
-    savings_line,
+    head_tail_snapshot, is_high_signal, normalise_for_compression, raw_recovery_line, savings_line,
 };
 use crate::proxy::token_meter::TokenMeter;
 
@@ -176,8 +175,8 @@ fn compact_stream(text: &str, exit_code: i32, budget: &OutputBudget) -> (String,
     if text.is_empty() {
         return (String::new(), 0);
     }
-    let dedup = dedupe_lines(text);
-    let (collapsed, _) = collapse_repeats(&dedup, budget.per_group_limit);
+    // Apply full normalisation: strip ANSI → global dedup → collapse repeats → blank lines.
+    let normalised = normalise_for_compression(text, budget.per_group_limit);
     let total_cap = if exit_code != 0 {
         budget.failure_max_lines
     } else {
@@ -187,7 +186,9 @@ fn compact_stream(text: &str, exit_code: i32, budget: &OutputBudget) -> (String,
     // compact body stays under `total_cap` lines.
     let cap = (total_cap as f64 * 0.45) as usize;
     let cap = cap.max(10).min(total_cap.saturating_sub(5));
-    head_tail_snapshot(&collapsed, cap, budget.max_bytes)
+    let (snapshot, included) = head_tail_snapshot(&normalised, cap, budget.max_bytes);
+    let original_line_count = text.lines().count();
+    (snapshot, original_line_count.saturating_sub(included))
 }
 
 fn collect_high_signal(stdout: &str, stderr: &str, cap: usize) -> String {
