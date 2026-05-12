@@ -94,13 +94,51 @@ if [ "$modify_shell_profile" = "true" ]; then
   profile="${HOME}/.profile"
   [ -n "${SHELL:-}" ] && [ "$(basename "$SHELL")" = "zsh" ] && profile="${HOME}/.zshrc"
   backup="${profile}.wf-core.bak.$(date +%Y%m%d%H%M%S)"
-  [ -f "$profile" ] && cp "$profile" "$backup"
+  backup_created="false"
+  if [ -f "$profile" ]; then
+    cp "$profile" "$backup"
+    backup_created="true"
+  fi
+  managed_block="$(mktemp)"
   {
-    printf '\n# wf-core managed:start\n'
+    printf '# wf-core managed:start\n'
     printf 'eval "$(%s shell init --channel %s)"\n' "$activation_binary" "$activation_channel"
     printf '# wf-core managed:end\n'
-  } >> "$profile"
-  printf 'Updated %s (backup: %s)\n' "$profile" "$backup"
+  } > "$managed_block"
+  if [ -f "$profile" ] &&
+    grep -q '# wf-core managed:start' "$profile" &&
+    grep -q '# wf-core managed:end' "$profile"; then
+    tmp_profile="${profile}.wf-core.tmp.$$"
+    awk -v block_file="$managed_block" '
+      BEGIN {
+        while ((getline line < block_file) > 0) {
+          block = block line ORS
+        }
+      }
+      /# wf-core managed:start/ {
+        printf "%s", block
+        in_block = 1
+        next
+      }
+      /# wf-core managed:end/ && in_block {
+        in_block = 0
+        next
+      }
+      !in_block { print }
+    ' "$profile" > "$tmp_profile"
+    mv "$tmp_profile" "$profile"
+  else
+    {
+      [ -f "$profile" ] && printf '\n'
+      cat "$managed_block"
+    } >> "$profile"
+  fi
+  rm -f "$managed_block"
+  if [ "$backup_created" = "true" ]; then
+    printf 'Updated %s (backup: %s)\n' "$profile" "$backup"
+  else
+    printf 'Updated %s (no previous file to back up)\n' "$profile"
+  fi
 else
   printf 'Shell profile not modified. Pass --modify-shell-profile to append a managed block.\n'
 fi

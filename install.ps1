@@ -70,16 +70,35 @@ Write-Host "  & `"$ActivationBinary`" shell init --channel $ActivationChannel --
 Write-Host "  & `"$ActivationBinary`" doctor --proxy --channel $ActivationChannel"
 
 if ($ModifyShellProfile) {
-    if (-not (Test-Path $PROFILE)) {
+    $HadProfile = Test-Path $PROFILE
+    if (-not $HadProfile) {
         New-Item -ItemType File -Path $PROFILE -Force | Out-Null
     }
-    $Backup = "$PROFILE.wf-core.bak.$(Get-Date -Format yyyyMMddHHmmss)"
-    Copy-Item $PROFILE $Backup -Force
-    Add-Content -Path $PROFILE -Value ""
-    Add-Content -Path $PROFILE -Value "# wf-core managed:start"
-    Add-Content -Path $PROFILE -Value "& `"$ActivationBinary`" shell init --channel $ActivationChannel --shell powershell | Invoke-Expression"
-    Add-Content -Path $PROFILE -Value "# wf-core managed:end"
-    Write-Host "Updated $PROFILE (backup: $Backup)"
+    $Backup = ""
+    if ($HadProfile) {
+        $Backup = "$PROFILE.wf-core.bak.$(Get-Date -Format yyyyMMddHHmmss)"
+        Copy-Item $PROFILE $Backup -Force
+    }
+
+    $ManagedBlock = @"
+# wf-core managed:start
+& "$ActivationBinary" shell init --channel $ActivationChannel --shell powershell | Invoke-Expression
+# wf-core managed:end
+"@
+    $Content = Get-Content -Path $PROFILE -Raw
+    if ($Content -match "(?s)# wf-core managed:start.*?# wf-core managed:end") {
+        $Content = [regex]::Replace($Content, "(?s)# wf-core managed:start.*?# wf-core managed:end", [System.Text.RegularExpressions.MatchEvaluator]{ param($Match) $ManagedBlock }, 1)
+    } elseif ([string]::IsNullOrWhiteSpace($Content)) {
+        $Content = "$ManagedBlock`r`n"
+    } else {
+        $Content = $Content.TrimEnd() + "`r`n`r`n$ManagedBlock`r`n"
+    }
+    Set-Content -Path $PROFILE -Value $Content -NoNewline
+    if ($HadProfile) {
+        Write-Host "Updated $PROFILE (backup: $Backup)"
+    } else {
+        Write-Host "Updated $PROFILE (no previous file to back up)"
+    }
 } else {
     Write-Host "Shell profile not modified. Pass -ModifyShellProfile to append a managed block."
 }
